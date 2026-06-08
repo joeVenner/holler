@@ -10,13 +10,13 @@
 
 Originally planned as "Talker"; renamed to **Holler** before the first code. Product/binary/workspace are `holler`; crates are `holler-app` (and future `holler-core`, `holler-audio`, …). Code, docs, and the repo directory have all been swept. (Historical "Talker" mentions may linger in git history.)
 
-## ⚠️ Status: PHASE 0 SCAFFOLD DONE — awaiting interactive verification
+## ⚠️ Status: PHASE 1 IN PROGRESS (audio capture done) — awaiting interactive verification
 
-- ✅ Git repo initialised (`feature/phase-0-scaffold`); Cargo workspace + `crates/holler-app` (binary `holler`) + `mimalloc` + lean release profile.
-- ✅ The one hard integration risk is wired: a single main-thread `winit` loop owns `tray-icon` + `global-hotkey`; events funnel in as `UserEvent`s via `EventLoopProxy`. Builds clean, clippy-clean, and **smoke-passes** (`[holler] ready` prints; tray + hotkey init without panic).
-- ⏳ **Remaining Phase 0 exit criteria need a human at the keyboard:** grant Accessibility, hold F8 → expect one `PTT DOWN`, release → one `PTT UP`, tray → Quit exits. (Can't be automated in-sandbox.)
+- ✅ **Phase 0** (`feature/phase-0-scaffold`): Cargo workspace + `crates/holler-app` (binary `holler`) + `mimalloc` + lean release profile. Single main-thread `winit` loop owns `tray-icon` + `global-hotkey`; events funnel in as `UserEvent`s via `EventLoopProxy` (`ControlFlow::Wait` + forwarder thread, no polling). PTT key = **Ctrl+Alt+Space** (F8 collided with macOS media keys). Smoke-passes.
+- ✅ **Phase 1 · audio** (`crates/holler-audio`): `AudioCapture` opens the mic only while PTT is held (cpal 0.18, `!Send` Stream on main thread), normalises any format → f32, downmixes to mono, resamples to 16 kHz (rubato 3.0 sinc). PTT UP logs the clip length + sample count. Builds clean, clippy-clean, 4 unit tests pass.
+- ⏳ **Both need a human at the keyboard to confirm:** grant **Accessibility** (for the hotkey) + **Microphone** (for capture), then hold Ctrl+Alt+Space, speak, release → expect `captured Ns, M samples @ 16kHz`; tray → Quit exits. (Can't be automated in-sandbox.)
 
-Next action: have Yassir run `cargo run`, grant Accessibility, and confirm the PTT down/up + Quit behaviour. Then begin **Phase 1** (`docs/PLAN.md` §5).
+Next action: build out the rest of Phase 1 — `holler-stt` (`whisper-rs`, local), then `holler-inject` (clipboard-paste→keystroke→manual), then `holler-store` (clipboard + SQLite history + TOML config). The Whisper **model tier** + **bundle-vs-download** open questions (DECISIONS) gate `holler-stt` — confirm with Yassir there.
 
 Before writing code, read in order:
 1. `docs/DECISIONS.md` — every locked decision + open questions. **Do not re-litigate these.**

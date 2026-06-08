@@ -12,6 +12,19 @@ Append hard-learned technical lessons and edge cases here, newest first, using t
 
 ---
 
+## [2026-06-08] Context Update — Phase 1 audio capture (holler-audio: cpal + rubato)
+- **What changed:** New `holler-audio` crate. `AudioCapture::start()` opens the default mic and records; `stop()` returns a `Recording` (16 kHz mono f32 + duration). Wired into the app: PTT DOWN starts capture, PTT UP stops and logs `captured Ns, M samples @ 16kHz`. Pipeline: cpal callback normalises to f32 → downmix to mono → rubato sinc resample to 16 kHz. Builds clean, clippy-clean, 4 unit tests pass; mic-permission'd end-to-end test is interactive (Yassir).
+- **Why:** Phase 1 step 1 — get speech into the exact buffer shape Whisper wants, testable offline before pulling in the heavy `whisper-rs` dependency.
+- **Versions pinned (resolved live by `cargo add`, 2026-06-08):** `cpal 0.18.1`, `rubato 3.0.0`. NOTE: both are **much newer than my Jan-2026 knowledge** — the ecosystem moved. Always `cargo add` + read the installed source rather than trusting memory or even research-agent prose.
+- **Hard-learned API lessons (verified against installed source, not agent output):**
+  - **The Phase-1 research agents got the *versions* right but the *APIs* wrong** (hallucinated a plausible cpal `&Data`/`as_slice` callback and an over-complex rubato snippet). Ground-truth check via the crate source in `~/.cargo/registry/src/` is mandatory for anything load-bearing.
+  - **cpal 0.18 typed `build_input_stream`** takes `config: StreamConfig` **by value** and a **`FnMut(&[T], &InputCallbackInfo)`** callback (typed slice, NOT `&Data` — that's `build_input_stream_raw`). It returns `Result<Stream, cpal::Error>` (no `BuildStreamError`). `StreamConfig.sample_rate` is now a **bare `u32`** (no `.0`). `StreamConfig` is `Copy` (pass `*config`).
+  - **Format-agnostic capture:** match `supported.sample_format()` and monomorphise the stream builder per type; `f32::from_sample(s)` (needs `use cpal::Sample`, bound `f32: FromSample<T>`) normalises every int/float format uniformly.
+  - **`Stream` is `!Send`** → `AudioCapture` lives on the main winit thread (where PTT events arrive). Dropping the stream stops the callback **synchronously**, so reading the shared buffer after drop is race-free. Callback uses `try_lock` (never block the realtime audio thread).
+  - **rubato 3.0 rewrote its API** around the `audioadapter` crate (re-exported as `rubato::audioadapter_buffers`, so no extra direct dep). One-shot clip resample = `Async::new_sinc(ratio, 1.1, &params, 1024, channels, FixedAsync::Input)` + a `process_into_buffer` loop driven by `Indexing { input_offset, output_offset, partial_len, .. }`, a final partial chunk with `partial_len = Some(left)`, then trim the leading `output_delay()` frames. Copy the idiom from the crate's `examples/process_f64.rs`.
+  - **Order matters:** downmix to mono *before* resampling (fewer samples; Whisper wants mono). Sinc (anti-aliased), not polynomial — speech-grade quality keeps STT accuracy up.
+- **Reference:** `crates/holler-audio/src/lib.rs`; workflow run `wf_70e5564a-985` (versions ✓, API ✗ — verified manually).
+
 ## [2026-06-08] Context Update — Phase 0 scaffold + integration spike (project renamed Talker → Holler)
 - **What changed:** `git init`; Cargo workspace + `crates/holler-app` (binary `holler`). Built the single-loop spike that the whole architecture bets on: one main-thread `winit` 0.30 loop owning `tray-icon` + `global-hotkey`. Builds clean, clippy-clean, smoke-passes (init without panic). Interactive PTT/Quit verification still pending a human + Accessibility grant.
 - **Why:** Phase 0's mandate is to prove the risky integration before any audio/STT work (PLAN.md §0, §5).
