@@ -17,7 +17,7 @@ use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
 };
 use holler_audio::AudioCapture;
-use holler_stt::{OpenAiStt, SttProvider};
+use holler_stt::{DeepgramStt, OpenAiStt, SttProvider};
 use mimalloc::MiMalloc;
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuId, MenuItem},
@@ -69,22 +69,13 @@ struct App {
     /// The live mic capture, present only between PTT down and up. cpal's
     /// `Stream` is `!Send`, so this (and `App`) stay on the main thread.
     capture: Option<AudioCapture>,
-    /// The configured STT provider, shared with worker threads. `None` until an
-    /// API key is stored (`holler set-key openai <KEY>`).
-    stt: Option<Arc<dyn SttProvider>>,
 }
 
 impl App {
     fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
-        // Try to build the STT provider from the stored key. Missing key is not
-        // an error — the user just hasn't run `set-key` yet; we nudge them at
-        // PTT time rather than failing to launch.
-        let stt: Option<Arc<dyn SttProvider>> =
-            match OpenAiStt::from_keychain(OpenAiStt::DEFAULT_MODEL.to_string()) {
-                Ok(provider) => Some(Arc::new(provider)),
-                Err(_) => None,
-            };
-
+        // NB: no keychain access here. Reading a key can trigger a (blocking)
+        // OS keychain prompt; doing it on the launch path would freeze startup.
+        // The provider is resolved lazily on the worker thread at PTT-release.
         Self {
             proxy,
             hotkeys: None,
@@ -93,7 +84,6 @@ impl App {
             quit_item_id: None,
             ptt_held: false,
             capture: None,
-            stt,
         }
     }
 
@@ -190,30 +180,24 @@ impl App {
     }
 
     /// Transcribe a finished recording on a worker thread (never block the
-    /// event loop on a network call) and post the result back via the proxy.
+    /// event loop on a network call or a keychain prompt) and post the result
+    /// back via the proxy. The provider is resolved here, off the main thread.
     fn transcribe(&self, rec: holler_audio::Recording) {
-        let Some(stt) = self.stt.clone() else {
-            println!(
-                "[holler] PTT UP — captured {:.2}s but no API key set. \
-                 Run: holler set-key openai <KEY>",
-                rec.duration_secs
-            );
-            return;
-        };
-
         println!(
-            "[holler] PTT UP — captured {:.2}s, transcribing via {}…",
-            rec.duration_secs,
-            stt.name()
+            "[holler] PTT UP — captured {:.2}s, transcribing…",
+            rec.duration_secs
         );
 
         let proxy = self.proxy.clone();
         std::thread::Builder::new()
             .name("holler-stt".into())
             .spawn(move || {
-                let result = stt
-                    .transcribe(&rec.samples, 16_000)
-                    .map_err(|e| e.to_string());
+                let result = match select_provider() {
+                    Some(stt) => stt.transcribe(&rec.samples, 16_000).map_err(|e| e.to_string()),
+                    None => Err("no API key set — run: \
+                                 holler set-key <openai|deepgram> <KEY>"
+                        .to_string()),
+                };
                 let _ = proxy.send_event(UserEvent::Transcript(result));
             })
             .expect("spawn transcription thread");
@@ -284,14 +268,31 @@ fn main() {
     }
 }
 
-/// Handle `holler set-key <provider> <KEY>`. Only "openai" is supported today.
+/// Pick the active STT provider from whichever key is stored. Deepgram wins
+/// when its key is present, else OpenAI; `None` if neither is set. Reads the
+/// keychain, so only call this OFF the main thread. (Replaced by explicit
+/// config selection once `holler-config` exists.)
+fn select_provider() -> Option<Arc<dyn SttProvider>> {
+    if let Ok(p) = DeepgramStt::from_keychain(DeepgramStt::DEFAULT_MODEL.to_string()) {
+        eprintln!("[holler] STT provider: deepgram ({})", DeepgramStt::DEFAULT_MODEL);
+        return Some(Arc::new(p));
+    }
+    if let Ok(p) = OpenAiStt::from_keychain(OpenAiStt::DEFAULT_MODEL.to_string()) {
+        eprintln!("[holler] STT provider: openai ({})", OpenAiStt::DEFAULT_MODEL);
+        return Some(Arc::new(p));
+    }
+    None
+}
+
+/// Handle `holler set-key <provider> <KEY>` for the supported cloud providers.
 fn run_set_key(args: &[String]) {
     let (Some(provider), Some(key)) = (args.get(2), args.get(3)) else {
-        eprintln!("usage: holler set-key openai <API_KEY>");
+        eprintln!("usage: holler set-key <openai|deepgram> <API_KEY>");
         std::process::exit(2);
     };
-    if provider != OpenAiStt::KEY_ACCOUNT {
-        eprintln!("unknown provider {provider:?}; supported: openai");
+    let supported = [OpenAiStt::KEY_ACCOUNT, DeepgramStt::KEY_ACCOUNT];
+    if !supported.contains(&provider.as_str()) {
+        eprintln!("unknown provider {provider:?}; supported: {}", supported.join(", "));
         std::process::exit(2);
     }
     match holler_stt::store_key(provider, key) {
