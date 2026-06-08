@@ -12,6 +12,14 @@ Append hard-learned technical lessons and edge cases here, newest first, using t
 
 ---
 
+## [2026-06-08] Context Update — Phase 1.5 VAD silence trim (webrtc-vad)
+- **What changed:** `holler_audio::vad_trim` trims leading/trailing silence from 16 kHz f32 recordings before STT using WebRTC VAD (Quality mode, 30 ms frames). Config gate `vad: bool` (default `true`) in `holler-config`. App logs trimmed seconds; skips VAD when disabled.
+- **Crate choice:** `webrtc-vad 0.4.0` over `voice_activity_detector` (Silero v5 via `ort`) — ONNX runtime footprint and download overhead not worth it for PTT use case. `webrtc-vad` compiles in ~3.6 s, has minimal deps, and the C FFI is stable. `!Send` raw pointer stays on the calling thread (function-local VAD instance, no cross-thread sharing).
+- **VAD signal for tests:** Pure sine waves can be too spectrally narrow for WebRTC's sub-band GMM classifier. A mix of 300 Hz + 900 Hz at 0.8 amplitude reliably triggers Quality mode detection across two voice sub-bands.
+- **Why Quality mode (not Aggressive):** PTT recordings start close to the key-press; aggressive mode risks cutting soft speech starts. Quality mode catches all real voice.
+- **Impact:** `holler-audio` (gains `webrtc-vad` dep + `vad_trim` fn + 3 tests), `holler-config` (adds `vad: bool`), `holler-app` (wires trim before `transcribe`).
+- **Reference:** commit `e153ce7`, `crates/holler-audio/src/lib.rs`.
+
 ## [2026-06-08] Context Update — remappable PTT key from config
 - **What changed:** `config.ptt_key` (TOML string, e.g. `"ctrl+alt+space"`) is now parsed at init into a live `HotKey` via a thin wrapper in `holler-config::ptt`. Hardcoded `PTT_MODS`/`PTT_CODE`/`PTT_LABEL` constants removed from `holler-app`. Tray tooltip and ready-log reflect the active combo; bad input falls back to `Ctrl+Alt+Space` with a warning.
 - **Why:** User-configurable PTT was spec'd in Phase 1 and is the top backlog item.
