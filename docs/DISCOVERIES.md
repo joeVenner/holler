@@ -12,6 +12,20 @@ Append hard-learned technical lessons and edge cases here, newest first, using t
 
 ---
 
+## [2026-06-08] Context Update — Phase 1 MVP complete: inject + store + config (text reaches the cursor)
+- **What changed:** Three new crates close the Phase-1 loop. On a finished transcription the app (main thread) now: copies to the **system clipboard**, records to **SQLite history**, and **injects at the active cursor**. Provider/model/injection-mode come from a **TOML config**.
+  - `holler-inject` (enigo 0.6.1): `Paste` mode = OS paste chord (Cmd/Ctrl+V), `Type` mode = `enigo.text()`.
+  - `holler-store` (rusqlite 0.40.1, `bundled`): `History` with record/search/recent; pure persistence, in-memory unit tests.
+  - `holler-config` (directories 6.0.0 + toml 1.1.2 + serde): `Config` (ptt_key, stt_provider, stt_model, injection_mode) with `#[serde(default)]`, load-or-create in the OS config dir.
+- **Versions pinned (`cargo add`):** enigo 0.6.1, arboard 3.6.1, rusqlite 0.40.1, directories 6.0.0, toml 1.1.2.
+- **Design lessons:**
+  - **enigo is main-thread-only on macOS** (CGEvent/TIS + Accessibility). Injection therefore runs in the `UserEvent::Transcript` handler (main thread), not the worker. Clipboard (arboard, also `!Send`) lives there too. Both are created **lazily** (the injector can pop an Accessibility prompt) — never on the launch path, same rule as the keychain.
+  - **"Copy memory" simplifies paste injection to zero clipboard gymnastics.** Holler *wants* the transcript left on the clipboard, so paste = `set clipboard` (which is also the copy feature) → fire Cmd/Ctrl+V. No save/restore dance. A ~60ms settle delay before the paste chord covers clipboard-propagation raciness (acceptable to run on the main loop — no rendering to stall).
+  - **Clipboard belongs in the app, not `holler-store`.** Keeping `holler-store` pure SQLite makes it unit-testable without a display (arboard needs one); clipboard is ephemeral main-thread output, co-located with injection.
+  - **arboard `Clipboard` and rusqlite `Connection` are both not `Sync`** (Connection is `Send`, not `Sync`) → one per thread, here the main thread.
+- **Phase 1 exit criteria MET (pending interactive check):** hold key → speak → release → text at cursor + on clipboard + in history. Needs a human to grant Accessibility + Microphone and confirm injection into a real app.
+- **Reference:** `crates/holler-{inject,store,config}/src/lib.rs`, `crates/holler-app/src/main.rs` (`deliver`, `build_provider`).
+
 ## [2026-06-08] Context Update — Phase 1 STT: Deepgram provider + keychain-at-launch fix
 - **What changed:** Added `DeepgramStt` behind `SttProvider` (providers now split into `openai.rs`/`deepgram.rs`, sharing `encode_wav` + the trait). App picks the provider by stored key (Deepgram preferred); `set-key` accepts `deepgram`. **Fixed a startup hang.**
 - **Deepgram batch API (mid-2026, web-verified):** `POST https://api.deepgram.com/v1/listen`, auth header **`Authorization: Token <KEY>`** (the `Token` scheme — `Bearer` 401s; Bearer is only for short-lived `/v1/auth/grant` tokens). Audio is the **raw request body** with `Content-Type: audio/wav` (NOT multipart). Options are query params: default `model=nova-3` + `smart_format=true` (punctuation/caps/number formatting — the big dictation win) + `language=en`. Transcript at `results.channels[0].alternatives[0].transcript` (top-level transcript is already smart-formatted). Errors: `{err_code, err_msg, request_id}` — surface `err_msg` + `request_id`. (`reqwest` 0.13 blocking builder lacks `.query()` with our features → build the query into the URL.)

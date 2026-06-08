@@ -91,11 +91,11 @@ Tray icon reflects state (idle/recording/processing). Debounce auto-repeat `Pres
 ### Phase 1 — Core dictation loop (MVP)
 > **Revised 2026-06-08:** cloud STT pulled forward from Phase 2 — Yassir wants STT **provider-selectable from the start** (user picks the model; local-download OR cloud BYOK incl. Deepgram). Built behind the `SttProvider` trait so providers are interchangeable. Model tier = **user-selectable menu** (not auto-detect); local models **download on demand**.
 - ✅ `holler-audio`: cpal capture gated by hold → rubato 16k mono f32.
-- 🔶 `holler-stt`: `SttProvider` trait. ✅ `OpenAiStt` (cloud, BYOK, `gpt-4o-mini-transcribe`). ⏳ `LocalWhisper` (`whisper-rs`, selectable model, download-on-demand), `Deepgram` (HTTP batch). Keys in keyring.
-- ⏳ `holler-config`: TOML — PTT combo, STT provider + model selection, injection mode. (Keys stay in keyring, never TOML.)
-- ⏳ `holler-inject`: clipboard-paste primary + keystroke fallback + manual fallback.
-- ⏳ `holler-store`: set clipboard (`arboard`) + SQLite history insert.
-- **Exit criteria: hold key, talk, release → text appears at cursor, on clipboard, in history (offline with local provider, or via cloud BYOK).**
+- 🔶 `holler-stt`: `SttProvider` trait. ✅ `OpenAiStt` (`gpt-4o-mini-transcribe`) + `DeepgramStt` (`nova-3`), cloud/BYOK, keys in keyring. ⏳ `LocalWhisper` (`whisper-rs`, selectable model, download-on-demand).
+- ✅ `holler-config`: TOML — PTT combo, STT provider + model selection, injection mode. (Keys stay in keyring, never TOML.)
+- ✅ `holler-inject`: clipboard-paste primary + keystroke (type) fallback. (Auto-detect-failure → manual fallback is future work; mode is config-selected for now.)
+- ✅ `holler-store`: SQLite history (record/search/recent). Clipboard set lives in the app (main-thread output, alongside injection).
+- **Exit criteria (code-complete, pending interactive check): hold key, talk, release → text appears at cursor, on clipboard, in history. Offline path arrives with the local Whisper provider.**
 
 ### Phase 1.5 — VAD + feedback
 - Silero VAD silence trimming; tray icon state (idle/recording/processing); optional minimal overlay.
