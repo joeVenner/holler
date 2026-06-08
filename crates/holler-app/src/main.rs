@@ -10,8 +10,11 @@
 //!
 //! CLI: `holler set-key openai <KEY>` stores an API key in the OS keychain.
 
+mod icons;
+
+use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arboard::Clipboard;
 use global_hotkey::{
@@ -25,15 +28,26 @@ use holler_stt::{DeepgramStt, OpenAiStt, SttProvider};
 use holler_store::History;
 use mimalloc::MiMalloc;
 use tray_icon::{
-    menu::{Menu, MenuEvent, MenuId, MenuItem},
+    menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
     Icon, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
 use winit::{
     application::ApplicationHandler,
-    event::WindowEvent,
+    event::{StartCause, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     window::WindowId,
 };
+
+/// How often the tray animation advances a frame.
+const FRAME_INTERVAL: Duration = Duration::from_millis(90);
+
+/// Visible tray state. `Idle` is static; the others animate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayState {
+    Idle,
+    Recording,
+    Processing,
+}
 
 /// Lower idle RSS — the whole point of a tray-resident app (PLAN.md §6).
 #[global_allocator]
@@ -75,6 +89,11 @@ struct App {
     tray: Option<TrayIcon>,
     ptt_hotkey_id: u32,
     quit_item_id: Option<MenuId>,
+    config_item_id: Option<MenuId>,
+    history_item_id: Option<MenuId>,
+    /// Current visible tray state and the animation frame within it.
+    tray_state: TrayState,
+    anim_frame: usize,
     /// True while the PTT key is physically held. The edge detector that makes
     /// this the source of truth is what debounces OS key auto-repeat.
     ptt_held: bool,
@@ -113,6 +132,10 @@ impl App {
             tray: None,
             ptt_hotkey_id: 0,
             quit_item_id: None,
+            config_item_id: None,
+            history_item_id: None,
+            tray_state: TrayState::Idle,
+            anim_frame: 0,
             ptt_held: false,
             capture: None,
             config,
@@ -130,14 +153,24 @@ impl App {
         }
 
         // --- Tray icon + menu ---
+        // A lightweight settings entry point until the Phase-2 egui window:
+        // open the config file / history folder, plus Quit.
         let menu = Menu::new();
+        let config_item = MenuItem::new("Edit Settings (config.toml)…", true, None);
+        let history_item = MenuItem::new("Open History Folder…", true, None);
         let quit_item = MenuItem::new("Quit Holler", true, None);
+        menu.append(&config_item).expect("append config item");
+        menu.append(&history_item).expect("append history item");
+        menu.append(&PredefinedMenuItem::separator())
+            .expect("append separator");
         menu.append(&quit_item).expect("append Quit menu item");
+        self.config_item_id = Some(config_item.id().clone());
+        self.history_item_id = Some(history_item.id().clone());
         self.quit_item_id = Some(quit_item.id().clone());
 
         let tray = TrayIconBuilder::new()
             .with_tooltip(format!("Holler — hold {PTT_LABEL} to talk"))
-            .with_icon(placeholder_icon())
+            .with_icon(state_icon(TrayState::Idle, 0))
             .with_menu(Box::new(menu))
             .build()
             .expect("build tray icon");
@@ -192,6 +225,7 @@ impl App {
                     match AudioCapture::start() {
                         Ok(capture) => {
                             self.capture = Some(capture);
+                            self.set_tray_state(TrayState::Recording);
                             println!("[holler] PTT DOWN — recording…");
                         }
                         Err(e) => eprintln!("[holler] could not start capture: {e}"),
@@ -204,8 +238,14 @@ impl App {
                     self.ptt_held = false;
                     match self.capture.take() {
                         Some(capture) => match capture.stop() {
-                            Ok(rec) => self.transcribe(rec),
-                            Err(e) => eprintln!("[holler] capture failed: {e}"),
+                            Ok(rec) => {
+                                self.set_tray_state(TrayState::Processing);
+                                self.transcribe(rec);
+                            }
+                            Err(e) => {
+                                eprintln!("[holler] capture failed: {e}");
+                                self.set_tray_state(TrayState::Idle);
+                            }
                         },
                         None => println!("[holler] PTT UP"),
                     }
@@ -281,6 +321,22 @@ impl App {
             }
             None => eprintln!("[holler] no injector; text is on the clipboard — paste manually"),
         }
+
+        self.set_tray_state(TrayState::Idle);
+    }
+
+    /// Switch the tray to a new state, resetting the animation and redrawing.
+    fn set_tray_state(&mut self, state: TrayState) {
+        self.tray_state = state;
+        self.anim_frame = 0;
+        self.render_tray();
+    }
+
+    /// Draw the current state/frame into the tray icon.
+    fn render_tray(&self) {
+        if let Some(tray) = &self.tray {
+            let _ = tray.set_icon(Some(state_icon(self.tray_state, self.anim_frame)));
+        }
     }
 
     fn ensure_clipboard(&mut self) -> Option<&mut Clipboard> {
@@ -306,9 +362,28 @@ impl App {
 
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        // Sleep until something happens — no busy polling.
         event_loop.set_control_flow(ControlFlow::Wait);
         self.init();
+    }
+
+    fn new_events(&mut self, _: &ActiveEventLoop, cause: StartCause) {
+        // Advance the tray animation when our frame timer fires.
+        if matches!(cause, StartCause::ResumeTimeReached { .. })
+            && self.tray_state != TrayState::Idle
+        {
+            self.anim_frame = (self.anim_frame + 1) % icons::FRAMES;
+            self.render_tray();
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Schedule the next frame while animating; otherwise sleep until an
+        // event wakes us (no polling — PLAN.md §6).
+        if self.tray_state == TrayState::Idle {
+            event_loop.set_control_flow(ControlFlow::Wait);
+        } else {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + FRAME_INTERVAL));
+        }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
@@ -318,13 +393,23 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.quit_item_id.as_ref() == Some(&e.id) {
                     println!("[holler] quit requested — exiting.");
                     event_loop.exit();
+                } else if self.config_item_id.as_ref() == Some(&e.id) {
+                    open_in_os(holler_config::config_path().ok().as_deref());
+                } else if self.history_item_id.as_ref() == Some(&e.id) {
+                    let folder = holler_store::default_db_path()
+                        .ok()
+                        .and_then(|p| p.parent().map(Path::to_path_buf));
+                    open_in_os(folder.as_deref());
                 }
             }
             // Tray events reach the same loop; the icon's behaviour (overlay,
             // state) is wired up later.
             UserEvent::Tray(e) => println!("[holler] tray event: {e:?}"),
             UserEvent::Transcript(Ok(t)) => self.deliver(t),
-            UserEvent::Transcript(Err(e)) => eprintln!("[holler] transcription failed: {e}"),
+            UserEvent::Transcript(Err(e)) => {
+                eprintln!("[holler] transcription failed: {e}");
+                self.set_tray_state(TrayState::Idle);
+            }
         }
     }
 
@@ -333,15 +418,32 @@ impl ApplicationHandler<UserEvent> for App {
     fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
 }
 
-/// A flat accent-blue square so the tray entry is visible on every platform
-/// without committing a binary asset. Real artwork lands with the GUI (Phase 2).
-fn placeholder_icon() -> Icon {
-    const SIZE: u32 = 32;
-    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    for _ in 0..(SIZE * SIZE) {
-        rgba.extend_from_slice(&[0x4C, 0x9A, 0xFF, 0xFF]);
+/// Build the tray `Icon` for a state + animation frame (see `icons.rs`).
+fn state_icon(state: TrayState, frame: usize) -> Icon {
+    let rgba = match state {
+        TrayState::Idle => icons::idle(),
+        TrayState::Recording => icons::recording(frame),
+        TrayState::Processing => icons::processing(frame),
+    };
+    Icon::from_rgba(rgba, icons::SIZE, icons::SIZE).expect("valid RGBA icon")
+}
+
+/// Open a file/folder in the OS default handler (Finder/Explorer/xdg-open).
+fn open_in_os(path: Option<&Path>) {
+    let Some(path) = path else {
+        eprintln!("[holler] could not resolve path to open");
+        return;
+    };
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(target_os = "windows")]
+    let program = "explorer";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let program = "xdg-open";
+
+    if let Err(e) = std::process::Command::new(program).arg(path).spawn() {
+        eprintln!("[holler] could not open {}: {e}", path.display());
     }
-    Icon::from_rgba(rgba, SIZE, SIZE).expect("valid RGBA icon")
 }
 
 fn main() {
