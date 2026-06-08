@@ -12,6 +12,18 @@ Append hard-learned technical lessons and edge cases here, newest first, using t
 
 ---
 
+## [2026-06-08] Context Update — animated tray + Deepgram server-side cleanup (LLM pass now optional)
+- **What changed:** (1) Tray icon is now **state-aware + animated**: calm blue dot (idle), pulsing red dot (recording), comet-trail spinner (transcribing). (2) Deepgram query gained **`dictation=true`** (+ explicit `punctuate=true`). (3) Tray menu gained "Edit Settings (config.toml)" + "Open History Folder" as a stopgap settings entry point.
+- **Deepgram cleanup verdict (web-researched — saves building LLM cleanup prematurely):** Deepgram cleans dictation **server-side, zero extra latency/cost**:
+  - `smart_format=true` → punctuation, capitalisation, numbers/dates/currency/emails/URLs.
+  - `dictation=true` (needs `punctuate`) → spoken "period"/"comma"/"new line"/"new paragraph" become real marks/newlines. (Caveat: a punctuation word spoken *after a pause* may be transcribed literally — Deepgram open issue.)
+  - `filler_words` **defaults to false → "um"/"uh" stripped** automatically (don't set it true).
+  - Leave `profanity_filter`/`redact`/`measurements` OFF (they mutate intended text).
+  - **What Deepgram CANNOT do (needs an LLM):** remove repetitions/false-starts ("the the", "where we will use where we"), strip fillers beyond um/uh ("like", "you know"), or rephrase. So **LLM cleanup stays optional + off-by-default** (Phase 2 polish toggle) — matches the original locked scope.
+- **Tray animation pattern:** programmatic RGBA icons (no committed binaries); animation advances only while non-idle via `ControlFlow::WaitUntil(now + 90ms)` in `about_to_wait`, frame bumped on `StartCause::ResumeTimeReached` in `new_events`. Idle → `ControlFlow::Wait` (full sleep, no polling — preserves the low-power goal). `tray.set_icon(Some(..))` on the main thread per frame; building a 32×32 `Icon::from_rgba` each frame is negligible.
+- **Note:** recording pulse is a symmetric sine, so frames 0 and FRAMES/2 are identical by design (caught a naive animation test).
+- **Reference:** `crates/holler-app/src/icons.rs`, `crates/holler-stt/src/deepgram.rs`.
+
 ## [2026-06-08] Context Update — macOS .app bundle (fixes injection + keychain permission friction)
 - **What changed:** `scripts/bundle-macos.sh` builds a double-clickable, ad-hoc-signed `Holler.app` (LSUIElement menubar agent; Info.plist with `NSMicrophoneUsageDescription`). Added a `README.md` quick-start. **Local Whisper deferred** per Yassir (Deepgram is the focus).
 - **Why:** Running `cargo run` (a bare, unsigned `target/debug/holler`) failed injection with *"the application does not have the permission to simulate input"* — macOS Accessibility (AXIsProcessTrusted) can't be reliably granted to a transient terminal-launched binary, and the keychain ACL re-prompts because the binary identity changes each build. Both need a **stable app identity**.

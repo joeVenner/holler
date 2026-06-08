@@ -19,9 +19,12 @@ Originally planned as "Talker"; renamed to **Holler** before the first code. Pro
 - ✅ **Packaging** (`scripts/bundle-macos.sh`): double-clickable, ad-hoc-signed `Holler.app` (LSUIElement menubar agent, mic usage string). A bundle gives macOS the **stable identity** required to grant **Accessibility** (synthesise paste/type) and remember keychain access — the fix for the "no permission to simulate input" error that bare `cargo run` binaries hit. See `README.md`.
 - ⏳ **Needs a human at the keyboard:** `scripts/bundle-macos.sh` → `open ./Holler.app`; grant **Accessibility** (enable Holler in System Settings) + **Microphone**; focus a text field, hold Ctrl+Alt+Space, speak, release → text at cursor + clipboard + history.
 
-**Decision update (2026-06-08):** **Local Whisper deferred** — Yassir is happy with Deepgram (`nova-3`) and has credit; focus stays on the cloud path. `LocalWhisper` (`whisper-rs`) remains designed-for behind `SttProvider` but is not a near-term priority.
+**Decision update (2026-06-08):** **Local Whisper deferred** — Deepgram (`nova-3`) is the focus. **LLM cleanup deferred to an optional, off-by-default Phase-2 toggle** — Deepgram does the cleanup server-side (`smart_format` + `dictation`; "um/uh" stripped by default). An LLM is only needed for repetition/false-start removal + rephrasing.
 
-Next action: **Phase 1.5** — Silero VAD (trim leading/trailing silence; tighter, cheaper Deepgram calls), tray-icon **state** (idle / recording / processing) for visible feedback, and a short audio/visual cue. Then **Phase 2** — optional LLM cleanup of transcripts (fix disfluencies/formatting) + egui settings GUI (provider/model menu, history search, key management) + a real Developer ID signature so permissions survive rebuilds.
+- ✅ **Tray UX:** state-aware **animated** tray (idle blue dot / recording pulsing red / processing spinner; `ControlFlow::WaitUntil` only while active, full sleep when idle). Menu has "Edit Settings (config.toml)" + "Open History Folder" as a stopgap settings entry.
+- ✅ **Deepgram dictation mode:** query now `smart_format=true&dictation=true&punctuate=true` — spoken punctuation/newlines + formatting, server-side.
+
+Next action: **Phase 1.5** — Silero VAD (trim silence → cheaper Deepgram calls). Then **Phase 2** — **egui settings window** (the hard 2nd integration risk: manual `egui-winit`+`egui-wgpu` in the same loop — provider/model menu, **remappable PTT key**, history search, key management) + optional LLM cleanup toggle + Developer ID signing.
 
 Before writing code, read in order:
 1. `docs/DECISIONS.md` — every locked decision + open questions. **Do not re-litigate these.**
