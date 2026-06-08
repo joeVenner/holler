@@ -1,20 +1,23 @@
-//! Holler — Phase 0 spike.
+//! Holler — push-to-talk dictation.
 //!
-//! Proves the one hard integration risk (CLAUDE.md / docs/PLAN.md §0 & §34):
-//! a SINGLE main-thread `winit` event loop that owns BOTH the `tray-icon`
-//! and the `global-hotkey` push-to-talk receiver, with reliable key
-//! down/up edge detection and OS auto-repeat debounced — on macOS and Windows.
+//! A SINGLE main-thread `winit` event loop owns the `tray-icon` and the
+//! `global-hotkey` push-to-talk receiver (CLAUDE.md / docs/PLAN.md §0 & §34).
+//! Holding the PTT key records the mic; releasing it transcribes the clip.
 //!
-//! Exit criteria (PLAN.md §5, Phase 0):
-//!   hold the PTT key  -> "PTT DOWN" logged exactly once
-//!   release it        -> "PTT UP"   logged exactly once
-//!   tray menu "Quit"  -> process exits cleanly.
+//! The loop must never block: capture runs on cpal's own audio thread, and
+//! transcription (a network call) runs on a spawned worker thread that posts
+//! the result back as a `UserEvent` via the `EventLoopProxy`.
+//!
+//! CLI: `holler set-key openai <KEY>` stores an API key in the OS keychain.
+
+use std::sync::Arc;
 
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
 };
 use holler_audio::AudioCapture;
+use holler_stt::{OpenAiStt, SttProvider};
 use mimalloc::MiMalloc;
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuId, MenuItem},
@@ -46,6 +49,9 @@ enum UserEvent {
     Hotkey(GlobalHotKeyEvent),
     Tray(TrayIconEvent),
     Menu(MenuEvent),
+    /// A finished transcription (Ok text, or a rendered error) from the worker
+    /// thread. Carried back into the loop so all state stays on the main thread.
+    Transcript(Result<String, String>),
 }
 
 struct App {
@@ -63,10 +69,22 @@ struct App {
     /// The live mic capture, present only between PTT down and up. cpal's
     /// `Stream` is `!Send`, so this (and `App`) stay on the main thread.
     capture: Option<AudioCapture>,
+    /// The configured STT provider, shared with worker threads. `None` until an
+    /// API key is stored (`holler set-key openai <KEY>`).
+    stt: Option<Arc<dyn SttProvider>>,
 }
 
 impl App {
     fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
+        // Try to build the STT provider from the stored key. Missing key is not
+        // an error — the user just hasn't run `set-key` yet; we nudge them at
+        // PTT time rather than failing to launch.
+        let stt: Option<Arc<dyn SttProvider>> =
+            match OpenAiStt::from_keychain(OpenAiStt::DEFAULT_MODEL.to_string()) {
+                Ok(provider) => Some(Arc::new(provider)),
+                Err(_) => None,
+            };
+
         Self {
             proxy,
             hotkeys: None,
@@ -75,6 +93,7 @@ impl App {
             quit_item_id: None,
             ptt_held: false,
             capture: None,
+            stt,
         }
     }
 
@@ -160,12 +179,7 @@ impl App {
                     self.ptt_held = false;
                     match self.capture.take() {
                         Some(capture) => match capture.stop() {
-                            // Phase 1 stops here; STT consumes `rec.samples` next.
-                            Ok(rec) => println!(
-                                "[holler] PTT UP — captured {:.2}s, {} samples @ 16kHz mono",
-                                rec.duration_secs,
-                                rec.samples.len()
-                            ),
+                            Ok(rec) => self.transcribe(rec),
                             Err(e) => eprintln!("[holler] capture failed: {e}"),
                         },
                         None => println!("[holler] PTT UP"),
@@ -173,6 +187,36 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Transcribe a finished recording on a worker thread (never block the
+    /// event loop on a network call) and post the result back via the proxy.
+    fn transcribe(&self, rec: holler_audio::Recording) {
+        let Some(stt) = self.stt.clone() else {
+            println!(
+                "[holler] PTT UP — captured {:.2}s but no API key set. \
+                 Run: holler set-key openai <KEY>",
+                rec.duration_secs
+            );
+            return;
+        };
+
+        println!(
+            "[holler] PTT UP — captured {:.2}s, transcribing via {}…",
+            rec.duration_secs,
+            stt.name()
+        );
+
+        let proxy = self.proxy.clone();
+        std::thread::Builder::new()
+            .name("holler-stt".into())
+            .spawn(move || {
+                let result = stt
+                    .transcribe(&rec.samples, 16_000)
+                    .map_err(|e| e.to_string());
+                let _ = proxy.send_event(UserEvent::Transcript(result));
+            })
+            .expect("spawn transcription thread");
     }
 }
 
@@ -192,9 +236,14 @@ impl ApplicationHandler<UserEvent> for App {
                     event_loop.exit();
                 }
             }
-            // Phase 0 just confirms tray events reach the same loop; the
-            // icon's behaviour (overlay, state) is wired up later.
+            // Tray events reach the same loop; the icon's behaviour (overlay,
+            // state) is wired up later.
             UserEvent::Tray(e) => println!("[holler] tray event: {e:?}"),
+            UserEvent::Transcript(Ok(text)) => {
+                // Next increments: inject at cursor + clipboard + history.
+                println!("[holler] transcript: {text}");
+            }
+            UserEvent::Transcript(Err(e)) => eprintln!("[holler] transcription failed: {e}"),
         }
     }
 
@@ -215,6 +264,14 @@ fn placeholder_icon() -> Icon {
 }
 
 fn main() {
+    // `holler set-key <provider> <KEY>` stores an API key in the OS keychain
+    // and exits — no event loop. (A stopgap until the Phase-2 settings UI.)
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("set-key") {
+        run_set_key(&args);
+        return;
+    }
+
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .expect("build winit event loop");
@@ -224,5 +281,24 @@ fn main() {
     if let Err(err) = event_loop.run_app(&mut app) {
         eprintln!("[holler] fatal: event loop error: {err}");
         std::process::exit(1);
+    }
+}
+
+/// Handle `holler set-key <provider> <KEY>`. Only "openai" is supported today.
+fn run_set_key(args: &[String]) {
+    let (Some(provider), Some(key)) = (args.get(2), args.get(3)) else {
+        eprintln!("usage: holler set-key openai <API_KEY>");
+        std::process::exit(2);
+    };
+    if provider != OpenAiStt::KEY_ACCOUNT {
+        eprintln!("unknown provider {provider:?}; supported: openai");
+        std::process::exit(2);
+    }
+    match holler_stt::store_key(provider, key) {
+        Ok(()) => println!("[holler] stored {provider} API key in the OS keychain."),
+        Err(e) => {
+            eprintln!("[holler] failed to store key: {e}");
+            std::process::exit(1);
+        }
     }
 }

@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 holler-audio = { path = "../holler-audio" }
+holler-stt = { path = "../holler-stt" }
 winit.workspace = true
 # `muda` (menus) is re-exported as `tray_icon::menu`, so we depend on it only
 # transitively — this keeps the menu/tray versions locked in lockstep.
