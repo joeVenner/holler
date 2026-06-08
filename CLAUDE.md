@@ -10,12 +10,12 @@
 
 Originally planned as "Talker"; renamed to **Holler** before the first code. Product/binary/workspace are `holler`; crates are `holler-app` (and future `holler-core`, `holler-audio`, …). Code, docs, and the repo directory have all been swept. (Historical "Talker" mentions may linger in git history.)
 
-## ⚠️ Status: PHASE 1 IN PROGRESS (audio + OpenAI STT done) — awaiting interactive verification
+## ⚠️ Status: PHASE 1 IN PROGRESS (audio + OpenAI & Deepgram STT done) — awaiting interactive verification
 
 - ✅ **Phase 0** (`feature/phase-0-scaffold`): Cargo workspace + `crates/holler-app` (binary `holler`) + `mimalloc` + lean release profile. Single main-thread `winit` loop owns `tray-icon` + `global-hotkey`; events funnel in as `UserEvent`s via `EventLoopProxy` (`ControlFlow::Wait` + forwarder thread, no polling). PTT key = **Ctrl+Alt+Space** (F8 collided with macOS media keys). Smoke-passes.
 - ✅ **Phase 1 · audio** (`crates/holler-audio`): `AudioCapture` opens the mic only while PTT is held (cpal 0.18, `!Send` Stream on main thread), normalises any format → f32, downmixes to mono, resamples to 16 kHz (rubato 3.0 sinc). 4 unit tests.
-- ✅ **Phase 1 · STT** (`crates/holler-stt`): provider-agnostic `SttProvider` trait + `OpenAiStt` (cloud, BYOK; `gpt-4o-mini-transcribe`). PTT UP transcribes on a worker thread → logs the text. API key in the OS keychain via `holler set-key openai <KEY>` (keyring 3, native backends). **Cloud STT was pulled forward from Phase 2** per Yassir (provider-selectable: local-download OR cloud BYOK incl. Deepgram). 2 unit tests; clippy-clean.
-- ⏳ **Needs a human at the keyboard:** `holler set-key openai <KEY>`, then `cargo run`; grant **Accessibility** + **Microphone**; hold Ctrl+Alt+Space, speak, release → expect `[holler] transcript: …`; tray → Quit exits.
+- ✅ **Phase 1 · STT** (`crates/holler-stt`): provider-agnostic `SttProvider` trait + **`OpenAiStt`** (`gpt-4o-mini-transcribe`) and **`DeepgramStt`** (`nova-3`, smart_format), both cloud/BYOK. App picks the provider by stored key (Deepgram preferred), resolved **lazily on the worker thread** (never reads the keychain on the launch path — that blocks on the OS prompt). Key in OS keychain via `holler set-key <openai|deepgram> <KEY>` (keyring 3). **Cloud STT pulled forward from Phase 2** per Yassir. clippy-clean, 6 unit tests.
+- ⏳ **Needs a human at the keyboard:** `holler set-key deepgram <KEY>`, then `cargo run`; grant **Accessibility** + **Microphone**; hold Ctrl+Alt+Space, speak, release → expect `[holler] transcript: …` (first dictation pops a one-time keychain prompt — click Always Allow); tray → Quit exits.
 
 Next action: the rest of provider-selectable STT — **Local Whisper** (`whisper-rs`, model menu, download) and **Deepgram** behind the same trait — plus a `holler-config` (TOML: provider/model selection) and `holler-store` (clipboard + SQLite history). Then `holler-inject` (clipboard-paste→keystroke→manual) so text lands at the cursor. Whisper **model tier** = user-selectable menu (DECISIONS #1 resolved); local model = download-on-demand (DECISIONS #3 resolved).
 
