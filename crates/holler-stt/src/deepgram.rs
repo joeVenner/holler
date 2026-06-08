@@ -76,11 +76,14 @@ impl SttProvider for DeepgramStt {
     fn transcribe(&self, samples: &[f32], sample_rate: u32) -> Result<String, SttError> {
         let wav = encode_wav(samples, sample_rate)?;
 
-        // smart_format gives punctuation + capitalisation + readable
-        // numbers/dates — the biggest win for clean injected dictation.
+        // Cleanup happens server-side (no LLM needed for most dictation):
+        //   smart_format → punctuation, caps, numbers/dates/currency/URLs
+        //   dictation    → spoken "period"/"comma"/"new line" become real marks
+        //   punctuate    → explicit; also required by dictation
+        // "um"/"uh" are stripped by default (filler_words defaults to false).
         // (Values are fixed/URL-safe, so building the query inline is fine.)
         let url = format!(
-            "{}?model={}&smart_format=true&language=en",
+            "{}?model={}&smart_format=true&dictation=true&punctuate=true&language=en",
             Self::ENDPOINT,
             self.model
         );
