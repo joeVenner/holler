@@ -1,0 +1,21 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Secrets — NEVER commit (keys live in the OS keychain via `keyring`)
+.env
+*.env
+secrets.toml
+
+# Local model files (Whisper models are downloaded on first run)
+*.bin
+*.gguf
+models/
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+*.swp

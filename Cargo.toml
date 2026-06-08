@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/holler-app"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["joeVenner <ylafrimi@gmail.com>"]
+
+# Versions verified against the live crates.io registry on 2026-06-08
+# (see docs/DISCOVERIES.md). Pin minor versions — these crates move fast.
+[workspace.dependencies]
+winit = "0.30.13"
+tray-icon = "0.24.0"
+global-hotkey = "0.8.0"
+mimalloc = "0.1.52"
+
+# Lean, low-idle-RSS release binary (PLAN.md §6). Dev/test stays on the
+# default profile so iteration is fast and tests can unwind.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

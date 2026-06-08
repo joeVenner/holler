@@ -1,0 +1,20 @@
+[package]
+name = "holler-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Holler — push-to-talk dictation for your agents. Phase 0: prove the tray + global-hotkey main-thread loop."
+
+# The product binary is just `holler`.
+[[bin]]
+name = "holler"
+path = "src/main.rs"
+
+[dependencies]
+winit.workspace = true
+# `muda` (menus) is re-exported as `tray_icon::menu`, so we depend on it only
+# transitively — this keeps the menu/tray versions locked in lockstep.
+tray-icon.workspace = true
+global-hotkey.workspace = true
+mimalloc.workspace = true
