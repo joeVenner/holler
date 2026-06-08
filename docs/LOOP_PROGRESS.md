@@ -4,12 +4,11 @@ Living checklist for the `/loop` self-build. The loop updates this every
 iteration. Rules + full task specs live in `docs/AUTOMODE.md`.
 
 ## Handoff (latest)
-- **2026-06-08** — Loop not started yet. Branch `feature/phase-0-scaffold`, clean
-  tree. Next up: task 1 (remappable PTT key). Scope: tasks 1–2 then STOP before
-  the egui GUI. Pacing: every 30 minutes.
+- **2026-06-08** — Task 1 done. Branch `feature/phase-0-scaffold`, clean tree.
+  Next up: task 2 (Silero VAD silence trim). Stop before egui GUI.
 
 ## Backlog
-- [ ] **1. Remappable PTT key from config** — combo parser → register from
+- [x] **1. Remappable PTT key from config** — combo parser → register from
   `config.ptt_key`; tray tooltip + ready-log reflect it; fallback on bad input;
   parser unit tests.
 - [ ] **2. Phase 1.5 Silero VAD silence trim** — verified VAD crate; trim
@@ -18,4 +17,4 @@ iteration. Rules + full task specs live in `docs/AUTOMODE.md`.
   cleanly.
 
 ## Log
-<!-- One line per iteration: YYYY-MM-DD — task — commit hash — note -->
+- 2026-06-08 — task 1 (remappable PTT key) — b5a5cfb — build+clippy+tests green; 7 new parser tests

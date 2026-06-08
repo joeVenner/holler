@@ -12,6 +12,13 @@ Append hard-learned technical lessons and edge cases here, newest first, using t
 
 ---
 
+## [2026-06-08] Context Update — remappable PTT key from config
+- **What changed:** `config.ptt_key` (TOML string, e.g. `"ctrl+alt+space"`) is now parsed at init into a live `HotKey` via a thin wrapper in `holler-config::ptt`. Hardcoded `PTT_MODS`/`PTT_CODE`/`PTT_LABEL` constants removed from `holler-app`. Tray tooltip and ready-log reflect the active combo; bad input falls back to `Ctrl+Alt+Space` with a warning.
+- **Why:** User-configurable PTT was spec'd in Phase 1 and is the top backlog item.
+- **Implementation lesson:** `global-hotkey 0.8` ships its own `HotKey::from_str` (alias-aware, case-insensitive) — only `meta` and `opt` needed pre-normalisation before delegating to it. `Code` (from `keyboard_types`) implements `Display` producing `"Space"`, `"F8"`, `"KeyA"` — strip the `"Key"` prefix for the label.
+- **Impact:** `holler-config` (gains `ptt` module + `global-hotkey` dep), `holler-app/src/main.rs`. 7 new unit tests.
+- **Reference:** commit `b5a5cfb`, `crates/holler-config/src/ptt.rs`.
+
 ## [2026-06-08] Context Update — animated tray + Deepgram server-side cleanup (LLM pass now optional)
 - **What changed:** (1) Tray icon is now **state-aware + animated**: calm blue dot (idle), pulsing red dot (recording), comet-trail spinner (transcribing). (2) Deepgram query gained **`dictation=true`** (+ explicit `punctuate=true`). (3) Tray menu gained "Edit Settings (config.toml)" + "Open History Folder" as a stopgap settings entry point.
 - **Deepgram cleanup verdict (web-researched — saves building LLM cleanup prematurely):** Deepgram cleans dictation **server-side, zero extra latency/cost**:
