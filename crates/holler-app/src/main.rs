@@ -11,6 +11,8 @@
 //! CLI: `holler set-key openai <KEY>` stores an API key in the OS keychain.
 
 mod icons;
+mod overlay;
+mod permissions;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -34,6 +36,7 @@ use winit::{
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     window::WindowId,
 };
+use overlay::Overlay;
 
 /// How often the tray animation advances a frame.
 const FRAME_INTERVAL: Duration = Duration::from_millis(90);
@@ -99,6 +102,16 @@ struct App {
     /// so we keep them off the launch path.
     clipboard: Option<Clipboard>,
     injector: Option<Injector>,
+    /// Cached result of AXIsProcessTrusted() / equivalent. Re-checked each time
+    /// `ensure_injector` is called in case the user granted it while running.
+    accessibility_ok: bool,
+    /// Avoid flooding the log with the same "grant Accessibility" note.
+    accessibility_warned: bool,
+    /// Tray menu items for the permissions section.
+    grant_access_item_id: Option<MenuId>,
+    grant_mic_item_id: Option<MenuId>,
+    /// Desktop recording indicator shown during PTT hold.
+    overlay: Option<Overlay>,
 }
 
 impl App {
@@ -116,6 +129,11 @@ impl App {
             .map_err(|e| eprintln!("[holler] history db unavailable ({e}); not recording."))
             .ok();
 
+        let accessibility_ok = permissions::accessibility_granted();
+        if !accessibility_ok {
+            println!("[holler] Accessibility not granted — auto-paste disabled. Grant via tray menu.");
+        }
+
         Self {
             proxy,
             hotkeys: None,
@@ -124,6 +142,8 @@ impl App {
             quit_item_id: None,
             config_item_id: None,
             history_item_id: None,
+            grant_access_item_id: None,
+            grant_mic_item_id: None,
             tray_state: TrayState::Idle,
             anim_frame: 0,
             ptt_held: false,
@@ -132,27 +152,50 @@ impl App {
             history,
             clipboard: None,
             injector: None,
+            accessibility_ok,
+            accessibility_warned: false,
+            overlay: None,
         }
     }
 
     /// Build everything that must live on the main thread once the loop runs.
     /// Idempotent: `resumed` can fire more than once on some platforms.
-    fn init(&mut self) {
+    fn init(&mut self, event_loop: &ActiveEventLoop) {
         if self.hotkeys.is_some() {
             return;
         }
 
         // --- Tray icon + menu ---
-        // A lightweight settings entry point until the Phase-2 egui window:
-        // open the config file / history folder, plus Quit.
         let menu = Menu::new();
+
+        // Permissions section.
+        let mic_label = "✓  Microphone";
+        let mic_item = MenuItem::new(mic_label, false, None); // always shown; disabled label
+        let ax_label = if self.accessibility_ok {
+            "✓  Accessibility (auto-paste active)".to_string()
+        } else {
+            "✗  Accessibility (auto-paste disabled)".to_string()
+        };
+        let ax_item = MenuItem::new(ax_label, false, None);
+        let grant_access_item = MenuItem::new("   Grant Accessibility Access…", !self.accessibility_ok, None);
+        let grant_mic_item = MenuItem::new("   Grant Microphone Access…", true, None);
+        menu.append(&mic_item).expect("append mic item");
+        menu.append(&ax_item).expect("append ax item");
+        menu.append(&grant_access_item).expect("append grant-access item");
+        menu.append(&grant_mic_item).expect("append grant-mic item");
+        self.grant_access_item_id = Some(grant_access_item.id().clone());
+        self.grant_mic_item_id = Some(grant_mic_item.id().clone());
+
+        menu.append(&PredefinedMenuItem::separator()).expect("separator");
+
+        // Settings section.
         let config_item = MenuItem::new("Edit Settings (config.toml)…", true, None);
         let history_item = MenuItem::new("Open History Folder…", true, None);
-        let quit_item = MenuItem::new("Quit Holler", true, None);
         menu.append(&config_item).expect("append config item");
         menu.append(&history_item).expect("append history item");
-        menu.append(&PredefinedMenuItem::separator())
-            .expect("append separator");
+        menu.append(&PredefinedMenuItem::separator()).expect("separator");
+
+        let quit_item = MenuItem::new("Quit Holler", true, None);
         menu.append(&quit_item).expect("append Quit menu item");
         self.config_item_id = Some(config_item.id().clone());
         self.history_item_id = Some(history_item.id().clone());
@@ -202,6 +245,12 @@ impl App {
             })
             .expect("spawn hotkey forwarder thread");
 
+        // Desktop recording indicator — created lazily here so we have an event loop.
+        self.overlay = Overlay::create(event_loop);
+        if self.overlay.is_none() {
+            eprintln!("[holler] overlay window unavailable (non-fatal)");
+        }
+
         println!("[holler] ready — hold {ptt_label} to talk; tray menu → Quit to exit.");
     }
 
@@ -218,6 +267,7 @@ impl App {
                         Ok(capture) => {
                             self.capture = Some(capture);
                             self.set_tray_state(TrayState::Recording);
+                            if let Some(ov) = &self.overlay { ov.show(); }
                             println!("[holler] PTT DOWN — recording…");
                         }
                         Err(e) => eprintln!("[holler] could not start capture: {e}"),
@@ -232,6 +282,7 @@ impl App {
                         Some(capture) => match capture.stop() {
                             Ok(rec) => {
                                 self.set_tray_state(TrayState::Processing);
+                                if let Some(ov) = &self.overlay { ov.hide(); }
                                 let rec = self.maybe_vad_trim(rec);
                                 self.transcribe(rec);
                             }
@@ -320,16 +371,33 @@ impl App {
         // 3. Inject at the active cursor. Paste reads the clipboard we just set;
         //    give it a moment to propagate (clipboard set is racy).
         let mode = InjectMode::from_config(&self.config.injection_mode);
-        if mode == InjectMode::Paste {
-            std::thread::sleep(Duration::from_millis(60));
-        }
-        match self.ensure_injector() {
-            Some(injector) => {
-                if let Err(e) = injector.deliver(&t.text, mode) {
-                    eprintln!("[holler] injection failed: {e} (text is on the clipboard — paste manually)");
+
+        // Re-check Accessibility in case the user granted it while running.
+        self.accessibility_ok = permissions::accessibility_granted();
+
+        if mode == InjectMode::Paste && !self.accessibility_ok {
+            // Text is already on clipboard — silent fallback, no error spam.
+            if !self.accessibility_warned {
+                self.accessibility_warned = true;
+                println!("[holler] auto-paste skipped — Accessibility not granted. Text is on clipboard; use tray menu → Grant Accessibility Access…");
+            }
+        } else {
+            if mode == InjectMode::Paste {
+                std::thread::sleep(Duration::from_millis(60));
+            }
+            match self.ensure_injector() {
+                Some(injector) => {
+                    if let Err(e) = injector.deliver(&t.text, mode) {
+                        eprintln!("[holler] injection failed: {e} (text is on clipboard — paste manually)");
+                    }
+                }
+                None => {
+                    if !self.accessibility_warned {
+                        self.accessibility_warned = true;
+                        eprintln!("[holler] injector unavailable — text is on clipboard");
+                    }
                 }
             }
-            None => eprintln!("[holler] no injector; text is on the clipboard — paste manually"),
         }
 
         self.set_tray_state(TrayState::Idle);
@@ -373,16 +441,21 @@ impl App {
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(ControlFlow::Wait);
-        self.init();
+        self.init(event_loop);
     }
 
     fn new_events(&mut self, _: &ActiveEventLoop, cause: StartCause) {
-        // Advance the tray animation when our frame timer fires.
+        // Advance the tray + overlay animation when our frame timer fires.
         if matches!(cause, StartCause::ResumeTimeReached { .. })
             && self.tray_state != TrayState::Idle
         {
             self.anim_frame = (self.anim_frame + 1) % icons::FRAMES;
             self.render_tray();
+            if self.tray_state == TrayState::Recording {
+                if let Some(ov) = &mut self.overlay {
+                    ov.render(self.anim_frame);
+                }
+            }
         }
     }
 
@@ -410,6 +483,11 @@ impl ApplicationHandler<UserEvent> for App {
                         .ok()
                         .and_then(|p| p.parent().map(Path::to_path_buf));
                     open_in_os(folder.as_deref());
+                } else if self.grant_access_item_id.as_ref() == Some(&e.id) {
+                    permissions::open_accessibility_settings();
+                    println!("[holler] opened Accessibility settings — restart Holler after granting.");
+                } else if self.grant_mic_item_id.as_ref() == Some(&e.id) {
+                    permissions::open_mic_settings();
                 }
             }
             // Tray events reach the same loop; the icon's behaviour (overlay,
@@ -423,9 +501,11 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    // Holler is windowless (tray only), so this never fires — but the trait
-    // requires it.
-    fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+    fn window_event(&mut self, _: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // Only the overlay window generates window events; close requests are ignored
+        // (the overlay is controlled by PTT state, not the user closing it).
+        let _ = (id, event);
+    }
 }
 
 /// Build the tray `Icon` for a state + animation frame (see `icons.rs`).
