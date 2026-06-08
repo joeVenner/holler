@@ -12,6 +12,16 @@ Append hard-learned technical lessons and edge cases here, newest first, using t
 
 ---
 
+## [2026-06-08] Context Update — macOS .app bundle (fixes injection + keychain permission friction)
+- **What changed:** `scripts/bundle-macos.sh` builds a double-clickable, ad-hoc-signed `Holler.app` (LSUIElement menubar agent; Info.plist with `NSMicrophoneUsageDescription`). Added a `README.md` quick-start. **Local Whisper deferred** per Yassir (Deepgram is the focus).
+- **Why:** Running `cargo run` (a bare, unsigned `target/debug/holler`) failed injection with *"the application does not have the permission to simulate input"* — macOS Accessibility (AXIsProcessTrusted) can't be reliably granted to a transient terminal-launched binary, and the keychain ACL re-prompts because the binary identity changes each build. Both need a **stable app identity**.
+- **Lessons:**
+  - **Injection (paste/type) needs Accessibility; the mic needs `NSMicrophoneUsageDescription`.** A bundled, signed `.app` is the only way to grant these persistently. The transcript still works without Accessibility — only the synthetic paste is blocked (text lands on the clipboard as the manual fallback, by design).
+  - **Bundle essentials:** `LSUIElement=true` (menubar agent, no Dock icon / no main window — matches the tray-only design); `NSMicrophoneUsageDescription` (a bundled app is *killed* on mic access without it, unlike a bare binary); `codesign --sign -` (ad-hoc) to get a valid Designated Requirement.
+  - **Ad-hoc signing caveat:** the TCC grant is tied to the binary's cdhash, so **rebuilding invalidates Accessibility** (must re-approve). A self-signed or Developer ID cert keys TCC to the cert identity instead → survives rebuilds. Deferred to Phase 3 (distribution hardening).
+  - `open ./Holler.app` launches via LaunchServices (permissions apply, logs go to the system log); run `./Holler.app/Contents/MacOS/holler` directly to see stdout logs under the same bundle identity.
+- **Reference:** `scripts/bundle-macos.sh`, `README.md`.
+
 ## [2026-06-08] Context Update — Phase 1 MVP complete: inject + store + config (text reaches the cursor)
 - **What changed:** Three new crates close the Phase-1 loop. On a finished transcription the app (main thread) now: copies to the **system clipboard**, records to **SQLite history**, and **injects at the active cursor**. Provider/model/injection-mode come from a **TOML config**.
   - `holler-inject` (enigo 0.6.1): `Paste` mode = OS paste chord (Cmd/Ctrl+V), `Type` mode = `enigo.text()`.

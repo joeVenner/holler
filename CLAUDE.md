@@ -10,15 +10,18 @@
 
 Originally planned as "Talker"; renamed to **Holler** before the first code. Product/binary/workspace are `holler`; crates are `holler-app` (and future `holler-core`, `holler-audio`, …). Code, docs, and the repo directory have all been swept. (Historical "Talker" mentions may linger in git history.)
 
-## ⚠️ Status: PHASE 1 MVP CODE-COMPLETE (capture → STT → cursor + clipboard + history) — awaiting interactive verification
+## ⚠️ Status: PHASE 1 MVP CODE-COMPLETE + macOS .app bundle — awaiting interactive verification
 
 - ✅ **Phase 0** (`feature/phase-0-scaffold`): Cargo workspace + `crates/holler-app` (binary `holler`) + `mimalloc` + lean release profile. Single main-thread `winit` loop owns `tray-icon` + `global-hotkey`; events funnel in as `UserEvent`s via `EventLoopProxy` (`ControlFlow::Wait` + forwarder thread, no polling). PTT key = **Ctrl+Alt+Space** (F8 collided with macOS media keys). Smoke-passes.
 - ✅ **Phase 1 · audio** (`crates/holler-audio`): `AudioCapture` opens the mic only while PTT is held (cpal 0.18, `!Send` Stream on main thread), normalises any format → f32, downmixes to mono, resamples to 16 kHz (rubato 3.0 sinc). 4 unit tests.
 - ✅ **Phase 1 · STT** (`crates/holler-stt`): provider-agnostic `SttProvider` trait + **`OpenAiStt`** (`gpt-4o-mini-transcribe`) and **`DeepgramStt`** (`nova-3`, smart_format), both cloud/BYOK. App picks the provider by stored key (Deepgram preferred), resolved **lazily on the worker thread** (never reads the keychain on the launch path — that blocks on the OS prompt). Key in OS keychain via `holler set-key <openai|deepgram> <KEY>` (keyring 3). **Cloud STT pulled forward from Phase 2** per Yassir. clippy-clean, 6 unit tests.
 - ✅ **Phase 1 · deliver** (`holler-inject` + `holler-store` + `holler-config`): on a transcript the app copies to clipboard, records to SQLite history, and injects at the cursor (paste chord, or type). Provider/model/injection-mode driven by a TOML config (`<config_dir>/Holler/config.toml`, default provider `deepgram`). 13 unit tests; clippy-clean.
-- ⏳ **Needs a human at the keyboard:** `holler set-key deepgram <KEY>`, then `cargo run`; grant **Accessibility** (hotkey **and** injection) + **Microphone**; focus a text field, hold Ctrl+Alt+Space, speak, release → text should appear at the cursor, be on the clipboard, and be in history. (First dictation pops one-time keychain + Accessibility prompts.)
+- ✅ **Packaging** (`scripts/bundle-macos.sh`): double-clickable, ad-hoc-signed `Holler.app` (LSUIElement menubar agent, mic usage string). A bundle gives macOS the **stable identity** required to grant **Accessibility** (synthesise paste/type) and remember keychain access — the fix for the "no permission to simulate input" error that bare `cargo run` binaries hit. See `README.md`.
+- ⏳ **Needs a human at the keyboard:** `scripts/bundle-macos.sh` → `open ./Holler.app`; grant **Accessibility** (enable Holler in System Settings) + **Microphone**; focus a text field, hold Ctrl+Alt+Space, speak, release → text at cursor + clipboard + history.
 
-Next action: **Local Whisper** provider (`whisper-rs`, selectable model, download-on-demand) behind `SttProvider` — the last piece of provider-selectable STT and the offline default. Then Phase 1.5 (VAD + tray state) / Phase 2 (LLM cleanup + egui settings with the provider/model menu + history search UI).
+**Decision update (2026-06-08):** **Local Whisper deferred** — Yassir is happy with Deepgram (`nova-3`) and has credit; focus stays on the cloud path. `LocalWhisper` (`whisper-rs`) remains designed-for behind `SttProvider` but is not a near-term priority.
+
+Next action: **Phase 1.5** — Silero VAD (trim leading/trailing silence; tighter, cheaper Deepgram calls), tray-icon **state** (idle / recording / processing) for visible feedback, and a short audio/visual cue. Then **Phase 2** — optional LLM cleanup of transcripts (fix disfluencies/formatting) + egui settings GUI (provider/model menu, history search, key management) + a real Developer ID signature so permissions survive rebuilds.
 
 Before writing code, read in order:
 1. `docs/DECISIONS.md` — every locked decision + open questions. **Do not re-litigate these.**
