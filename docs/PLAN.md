@@ -88,21 +88,22 @@ Tray icon reflects state (idle/recording/processing). Debounce auto-repeat `Pres
 - **Prove PTT key down/up fires reliably on macOS AND Windows**, auto-repeat debounced. Log press/release.
 - Exit criteria: hold key → "DOWN" logged once; release → "UP" logged once; tray menu quits cleanly.
 
-### Phase 1 — Core local dictation loop (MVP)
-- `holler-audio`: cpal capture gated by hold → ring buffer → rubato 16k mono f32.
-- `holler-stt`: `LocalWhisper` via `whisper-rs` (`large-v3-turbo`, metal/CPU), transcribe on release.
-- `holler-inject`: clipboard-paste primary + keystroke fallback + manual fallback.
-- `holler-store`: set clipboard (`arboard`) + SQLite history insert; TOML config; keyring scaffold.
-- Config: PTT combo, model tier (auto-detect default), injection mode.
-- **Exit criteria: hold key, talk, release → text appears at cursor, on clipboard, in history — fully offline.**
+### Phase 1 — Core dictation loop (MVP)
+> **Revised 2026-06-08:** cloud STT pulled forward from Phase 2 — Yassir wants STT **provider-selectable from the start** (user picks the model; local-download OR cloud BYOK incl. Deepgram). Built behind the `SttProvider` trait so providers are interchangeable. Model tier = **user-selectable menu** (not auto-detect); local models **download on demand**.
+- ✅ `holler-audio`: cpal capture gated by hold → rubato 16k mono f32.
+- 🔶 `holler-stt`: `SttProvider` trait. ✅ `OpenAiStt` (cloud, BYOK, `gpt-4o-mini-transcribe`). ⏳ `LocalWhisper` (`whisper-rs`, selectable model, download-on-demand), `Deepgram` (HTTP batch). Keys in keyring.
+- ⏳ `holler-config`: TOML — PTT combo, STT provider + model selection, injection mode. (Keys stay in keyring, never TOML.)
+- ⏳ `holler-inject`: clipboard-paste primary + keystroke fallback + manual fallback.
+- ⏳ `holler-store`: set clipboard (`arboard`) + SQLite history insert.
+- **Exit criteria: hold key, talk, release → text appears at cursor, on clipboard, in history (offline with local provider, or via cloud BYOK).**
 
 ### Phase 1.5 — VAD + feedback
 - Silero VAD silence trimming; tray icon state (idle/recording/processing); optional minimal overlay.
 
-### Phase 2 — Cloud STT + LLM cleanup + egui settings
-- `SttProvider`: Deepgram (batch-on-release via HTTP; WS only if live words wanted), OpenAI (`gpt-4o-mini-transcribe`).
+### Phase 2 — LLM cleanup + egui settings
+> Cloud STT moved to Phase 1 (see above). This phase is now LLM post-processing + the GUI.
 - `LlmProvider`: Claude, OpenAI, OpenAICompatible(local Ollama). "Modes": raw / cleaned / formatted prompts.
-- egui settings window via manual `egui-winit`+`egui-wgpu` integration; history search UI; provider/key management (keyring).
+- egui settings window via manual `egui-winit`+`egui-wgpu` integration; history search UI; the STT provider/model **menu** + key management (keyring) surfaced here (config-field only until then).
 
 ### Phase 3 — TTS read-back + distribution hardening
 - `TtsProvider`: OpenAI / Deepgram Aura. Separate hotkey reads current selection/clipboard aloud.

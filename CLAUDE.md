@@ -10,13 +10,14 @@
 
 Originally planned as "Talker"; renamed to **Holler** before the first code. Product/binary/workspace are `holler`; crates are `holler-app` (and future `holler-core`, `holler-audio`, …). Code, docs, and the repo directory have all been swept. (Historical "Talker" mentions may linger in git history.)
 
-## ⚠️ Status: PHASE 1 IN PROGRESS (audio capture done) — awaiting interactive verification
+## ⚠️ Status: PHASE 1 IN PROGRESS (audio + OpenAI STT done) — awaiting interactive verification
 
 - ✅ **Phase 0** (`feature/phase-0-scaffold`): Cargo workspace + `crates/holler-app` (binary `holler`) + `mimalloc` + lean release profile. Single main-thread `winit` loop owns `tray-icon` + `global-hotkey`; events funnel in as `UserEvent`s via `EventLoopProxy` (`ControlFlow::Wait` + forwarder thread, no polling). PTT key = **Ctrl+Alt+Space** (F8 collided with macOS media keys). Smoke-passes.
-- ✅ **Phase 1 · audio** (`crates/holler-audio`): `AudioCapture` opens the mic only while PTT is held (cpal 0.18, `!Send` Stream on main thread), normalises any format → f32, downmixes to mono, resamples to 16 kHz (rubato 3.0 sinc). PTT UP logs the clip length + sample count. Builds clean, clippy-clean, 4 unit tests pass.
-- ⏳ **Both need a human at the keyboard to confirm:** grant **Accessibility** (for the hotkey) + **Microphone** (for capture), then hold Ctrl+Alt+Space, speak, release → expect `captured Ns, M samples @ 16kHz`; tray → Quit exits. (Can't be automated in-sandbox.)
+- ✅ **Phase 1 · audio** (`crates/holler-audio`): `AudioCapture` opens the mic only while PTT is held (cpal 0.18, `!Send` Stream on main thread), normalises any format → f32, downmixes to mono, resamples to 16 kHz (rubato 3.0 sinc). 4 unit tests.
+- ✅ **Phase 1 · STT** (`crates/holler-stt`): provider-agnostic `SttProvider` trait + `OpenAiStt` (cloud, BYOK; `gpt-4o-mini-transcribe`). PTT UP transcribes on a worker thread → logs the text. API key in the OS keychain via `holler set-key openai <KEY>` (keyring 3, native backends). **Cloud STT was pulled forward from Phase 2** per Yassir (provider-selectable: local-download OR cloud BYOK incl. Deepgram). 2 unit tests; clippy-clean.
+- ⏳ **Needs a human at the keyboard:** `holler set-key openai <KEY>`, then `cargo run`; grant **Accessibility** + **Microphone**; hold Ctrl+Alt+Space, speak, release → expect `[holler] transcript: …`; tray → Quit exits.
 
-Next action: build out the rest of Phase 1 — `holler-stt` (`whisper-rs`, local), then `holler-inject` (clipboard-paste→keystroke→manual), then `holler-store` (clipboard + SQLite history + TOML config). The Whisper **model tier** + **bundle-vs-download** open questions (DECISIONS) gate `holler-stt` — confirm with Yassir there.
+Next action: the rest of provider-selectable STT — **Local Whisper** (`whisper-rs`, model menu, download) and **Deepgram** behind the same trait — plus a `holler-config` (TOML: provider/model selection) and `holler-store` (clipboard + SQLite history). Then `holler-inject` (clipboard-paste→keystroke→manual) so text lands at the cursor. Whisper **model tier** = user-selectable menu (DECISIONS #1 resolved); local model = download-on-demand (DECISIONS #3 resolved).
 
 Before writing code, read in order:
 1. `docs/DECISIONS.md` — every locked decision + open questions. **Do not re-litigate these.**
