@@ -11,13 +11,18 @@
 //! CLI: `holler set-key openai <KEY>` stores an API key in the OS keychain.
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use arboard::Clipboard;
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
 };
 use holler_audio::AudioCapture;
+use holler_config::Config;
+use holler_inject::{InjectMode, Injector};
 use holler_stt::{DeepgramStt, OpenAiStt, SttProvider};
+use holler_store::History;
 use mimalloc::MiMalloc;
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuId, MenuItem},
@@ -49,9 +54,16 @@ enum UserEvent {
     Hotkey(GlobalHotKeyEvent),
     Tray(TrayIconEvent),
     Menu(MenuEvent),
-    /// A finished transcription (Ok text, or a rendered error) from the worker
-    /// thread. Carried back into the loop so all state stays on the main thread.
-    Transcript(Result<String, String>),
+    /// A finished transcription (or a rendered error) from the worker thread.
+    /// Carried back into the loop so delivery stays on the main thread.
+    Transcript(Result<Transcription, String>),
+}
+
+/// A successful transcription plus which provider produced it (for history).
+#[derive(Debug)]
+struct Transcription {
+    text: String,
+    provider: String,
 }
 
 struct App {
@@ -69,6 +81,15 @@ struct App {
     /// The live mic capture, present only between PTT down and up. cpal's
     /// `Stream` is `!Send`, so this (and `App`) stay on the main thread.
     capture: Option<AudioCapture>,
+    /// Non-secret settings (provider, model, injection mode). Loaded at startup.
+    config: Config,
+    /// Transcript history (SQLite). Opened at startup; `None` if it failed.
+    history: Option<History>,
+    /// Clipboard + input simulation are lazily created on first use — both are
+    /// main-thread/`!Send` and the injector can trigger an Accessibility prompt,
+    /// so we keep them off the launch path.
+    clipboard: Option<Clipboard>,
+    injector: Option<Injector>,
 }
 
 impl App {
@@ -76,6 +97,16 @@ impl App {
         // NB: no keychain access here. Reading a key can trigger a (blocking)
         // OS keychain prompt; doing it on the launch path would freeze startup.
         // The provider is resolved lazily on the worker thread at PTT-release.
+        // Config (filesystem) and history (SQLite) are prompt-free, so they're
+        // fine to load eagerly.
+        let config = holler_config::load_or_create().unwrap_or_else(|e| {
+            eprintln!("[holler] config load failed ({e}); using defaults.");
+            Config::default()
+        });
+        let history = History::open_default()
+            .map_err(|e| eprintln!("[holler] history db unavailable ({e}); not recording."))
+            .ok();
+
         Self {
             proxy,
             hotkeys: None,
@@ -84,6 +115,10 @@ impl App {
             quit_item_id: None,
             ptt_held: false,
             capture: None,
+            config,
+            history,
+            clipboard: None,
+            injector: None,
         }
     }
 
@@ -181,7 +216,8 @@ impl App {
 
     /// Transcribe a finished recording on a worker thread (never block the
     /// event loop on a network call or a keychain prompt) and post the result
-    /// back via the proxy. The provider is resolved here, off the main thread.
+    /// back via the proxy. Provider/model come from config; resolution (which
+    /// reads the keychain) happens off the main thread.
     fn transcribe(&self, rec: holler_audio::Recording) {
         println!(
             "[holler] PTT UP — captured {:.2}s, transcribing…",
@@ -189,18 +225,82 @@ impl App {
         );
 
         let proxy = self.proxy.clone();
+        let provider = self.config.stt_provider.clone();
+        let model = self.config.model_override().map(str::to_string);
+
         std::thread::Builder::new()
             .name("holler-stt".into())
             .spawn(move || {
-                let result = match select_provider() {
-                    Some(stt) => stt.transcribe(&rec.samples, 16_000).map_err(|e| e.to_string()),
-                    None => Err("no API key set — run: \
-                                 holler set-key <openai|deepgram> <KEY>"
-                        .to_string()),
+                let result = match build_provider(&provider, model) {
+                    Some(stt) => stt
+                        .transcribe(&rec.samples, 16_000)
+                        .map(|text| Transcription {
+                            text,
+                            provider: stt.name().to_string(),
+                        })
+                        .map_err(|e| e.to_string()),
+                    None => Err(format!(
+                        "no API key for '{provider}' — run: holler set-key {provider} <KEY>"
+                    )),
                 };
                 let _ = proxy.send_event(UserEvent::Transcript(result));
             })
             .expect("spawn transcription thread");
+    }
+
+    /// Deliver a transcript on the main thread: copy to clipboard ("copy
+    /// memory"), record to history, then inject at the cursor.
+    fn deliver(&mut self, t: Transcription) {
+        println!("[holler] transcript: {}", t.text);
+
+        // 1. Copy to the system clipboard (also primes the paste injection).
+        if let Some(clipboard) = self.ensure_clipboard() {
+            if let Err(e) = clipboard.set_text(t.text.clone()) {
+                eprintln!("[holler] clipboard set failed: {e}");
+            }
+        }
+
+        // 2. Record to searchable history.
+        if let Some(history) = &self.history {
+            if let Err(e) = history.record(&t.text, &t.provider) {
+                eprintln!("[holler] history record failed: {e}");
+            }
+        }
+
+        // 3. Inject at the active cursor. Paste reads the clipboard we just set;
+        //    give it a moment to propagate (clipboard set is racy).
+        let mode = InjectMode::from_config(&self.config.injection_mode);
+        if mode == InjectMode::Paste {
+            std::thread::sleep(Duration::from_millis(60));
+        }
+        match self.ensure_injector() {
+            Some(injector) => {
+                if let Err(e) = injector.deliver(&t.text, mode) {
+                    eprintln!("[holler] injection failed: {e} (text is on the clipboard — paste manually)");
+                }
+            }
+            None => eprintln!("[holler] no injector; text is on the clipboard — paste manually"),
+        }
+    }
+
+    fn ensure_clipboard(&mut self) -> Option<&mut Clipboard> {
+        if self.clipboard.is_none() {
+            match Clipboard::new() {
+                Ok(c) => self.clipboard = Some(c),
+                Err(e) => eprintln!("[holler] clipboard unavailable: {e}"),
+            }
+        }
+        self.clipboard.as_mut()
+    }
+
+    fn ensure_injector(&mut self) -> Option<&mut Injector> {
+        if self.injector.is_none() {
+            match Injector::new() {
+                Ok(i) => self.injector = Some(i),
+                Err(e) => eprintln!("[holler] {e}"),
+            }
+        }
+        self.injector.as_mut()
     }
 }
 
@@ -223,10 +323,7 @@ impl ApplicationHandler<UserEvent> for App {
             // Tray events reach the same loop; the icon's behaviour (overlay,
             // state) is wired up later.
             UserEvent::Tray(e) => println!("[holler] tray event: {e:?}"),
-            UserEvent::Transcript(Ok(text)) => {
-                // Next increments: inject at cursor + clipboard + history.
-                println!("[holler] transcript: {text}");
-            }
+            UserEvent::Transcript(Ok(t)) => self.deliver(t),
             UserEvent::Transcript(Err(e)) => eprintln!("[holler] transcription failed: {e}"),
         }
     }
@@ -268,20 +365,29 @@ fn main() {
     }
 }
 
-/// Pick the active STT provider from whichever key is stored. Deepgram wins
-/// when its key is present, else OpenAI; `None` if neither is set. Reads the
-/// keychain, so only call this OFF the main thread. (Replaced by explicit
-/// config selection once `holler-config` exists.)
-fn select_provider() -> Option<Arc<dyn SttProvider>> {
-    if let Ok(p) = DeepgramStt::from_keychain(DeepgramStt::DEFAULT_MODEL.to_string()) {
-        eprintln!("[holler] STT provider: deepgram ({})", DeepgramStt::DEFAULT_MODEL);
-        return Some(Arc::new(p));
+/// Build the configured STT provider (reading its key from the keychain).
+/// `model` overrides the provider default when `Some`. Returns `None` if the
+/// provider is unknown or has no stored key. Reads the keychain — call OFF the
+/// main thread.
+fn build_provider(provider: &str, model: Option<String>) -> Option<Arc<dyn SttProvider>> {
+    match provider {
+        "deepgram" => {
+            let m = model.unwrap_or_else(|| DeepgramStt::DEFAULT_MODEL.to_string());
+            DeepgramStt::from_keychain(m)
+                .ok()
+                .map(|p| Arc::new(p) as Arc<dyn SttProvider>)
+        }
+        "openai" => {
+            let m = model.unwrap_or_else(|| OpenAiStt::DEFAULT_MODEL.to_string());
+            OpenAiStt::from_keychain(m)
+                .ok()
+                .map(|p| Arc::new(p) as Arc<dyn SttProvider>)
+        }
+        other => {
+            eprintln!("[holler] unknown stt_provider {other:?} in config; supported: deepgram, openai");
+            None
+        }
     }
-    if let Ok(p) = OpenAiStt::from_keychain(OpenAiStt::DEFAULT_MODEL.to_string()) {
-        eprintln!("[holler] STT provider: openai ({})", OpenAiStt::DEFAULT_MODEL);
-        return Some(Arc::new(p));
-    }
-    None
 }
 
 /// Handle `holler set-key <provider> <KEY>` for the supported cloud providers.
