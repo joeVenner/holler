@@ -26,13 +26,20 @@ APP_NAME="Holler"
 BUNDLE_ID="com.holler.holler"
 VERSION="0.1.0"
 APP_DIR="${APP_NAME}.app"
-BIN_SRC="target/release/holler"
 
-echo "==> Building release binary"
-cargo build --release -p holler-app
+# Allow CI to pass a pre-built binary via BINARY_PATH env var.
+# If not set, build from source (standard local usage).
+if [[ -n "${BINARY_PATH:-}" ]]; then
+  BIN_SRC="$BINARY_PATH"
+  echo "==> Using pre-built binary: $BIN_SRC"
+else
+  BIN_SRC="target/release/holler"
+  echo "==> Building release binary"
+  cargo build --release -p holler-app
+fi
 
 if [[ ! -f "$BIN_SRC" ]]; then
-  echo "error: $BIN_SRC not found after build" >&2
+  echo "error: binary not found at $BIN_SRC" >&2
   exit 1
 fi
 

@@ -267,7 +267,12 @@ impl App {
                         Ok(capture) => {
                             self.capture = Some(capture);
                             self.set_tray_state(TrayState::Recording);
-                            if let Some(ov) = &self.overlay { ov.show(); }
+                            // Pre-render frame 0 before showing so the window
+                            // has content the moment it becomes visible.
+                            if let Some(ov) = &mut self.overlay {
+                                ov.render(0);
+                                ov.show();
+                            }
                             println!("[holler] PTT DOWN — recording…");
                         }
                         Err(e) => eprintln!("[holler] could not start capture: {e}"),
@@ -428,9 +433,16 @@ impl App {
     }
 
     fn ensure_injector(&mut self) -> Option<&mut Injector> {
-        if self.injector.is_none() {
+        // Re-try if Accessibility was just granted (accessibility_ok flipped
+        // to true in `deliver` before this call), otherwise skip to avoid
+        // repeated error logging on every transcription.
+        let should_try = self.injector.is_none() && self.accessibility_ok;
+        if should_try {
             match Injector::new() {
-                Ok(i) => self.injector = Some(i),
+                Ok(i) => {
+                    self.injector = Some(i);
+                    println!("[holler] injector ready (Accessibility granted)");
+                }
                 Err(e) => eprintln!("[holler] {e}"),
             }
         }

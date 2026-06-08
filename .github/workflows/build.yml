@@ -46,15 +46,11 @@ jobs:
         run: cargo test --target ${{ matrix.target }}
 
       - name: Bundle .app (ad-hoc signed)
+        env:
+          BINARY_PATH: target/${{ matrix.target }}/release/holler
         run: |
-          ARCH=${{ matrix.target }}
-          cp target/$ARCH/release/holler target/release/holler 2>/dev/null || \
-            cp target/$ARCH/release/holler /tmp/holler-bin
-          # Copy binary where the bundle script expects it.
-          mkdir -p target/release
-          cp target/$ARCH/release/holler target/release/holler
           bash scripts/bundle-macos.sh
-          mv Holler.app Holler-$ARCH.app
+          mv Holler.app Holler-${{ matrix.target }}.app
 
       - name: Create DMG
         run: |
@@ -106,9 +102,9 @@ jobs:
             -output target/universal-apple-darwin/release/holler
 
       - name: Bundle universal .app
-        run: |
-          cp target/universal-apple-darwin/release/holler target/release/holler
-          bash scripts/bundle-macos.sh
+        env:
+          BINARY_PATH: target/universal-apple-darwin/release/holler
+        run: bash scripts/bundle-macos.sh
 
       - name: Create universal DMG
         run: |
@@ -153,15 +149,14 @@ jobs:
       - name: Package ZIP
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path dist -Force
-          Copy-Item target\x86_64-pc-windows-msvc\release\holler.exe dist\
-          Compress-Archive -Path dist\* -DestinationPath Holler-Windows-x64.zip
+          pwsh scripts\bundle-windows.ps1 `
+            -BinaryPath target\x86_64-pc-windows-msvc\release\holler.exe
 
       - name: Upload Windows ZIP
         uses: actions/upload-artifact@v4
         with:
           name: Holler-Windows-x64
-          path: Holler-Windows-x64.zip
+          path: Holler-Windows-x64-v*.zip
 
   # ─── Release (tags only) ────────────────────────────────────────────────────
   release:
@@ -182,5 +177,5 @@ jobs:
         with:
           files: |
             Holler-macOS-universal.dmg
-            Holler-Windows-x64.zip
+            Holler-Windows-x64-v*.zip
           generate_release_notes: true
