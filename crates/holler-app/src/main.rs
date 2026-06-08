@@ -11,7 +11,7 @@
 //!   tray menu "Quit"  -> process exits cleanly.
 
 use global_hotkey::{
-    hotkey::{Code, HotKey},
+    hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
 };
 use mimalloc::MiMalloc;
@@ -30,9 +30,12 @@ use winit::{
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-/// PTT trigger for the spike. A bare key avoids modifier book-keeping; it
-/// becomes configurable in Phase 1 (DECISIONS open question #2).
-const PTT_KEY: Code = Code::F8;
+/// PTT trigger. `Ctrl+Alt+Space` has no OS conflicts (unlike the function
+/// keys, which macOS hijacks for media), works on every keyboard, and is
+/// comfortable to hold. Becomes user-configurable in Phase 1 (DECISIONS #2).
+const PTT_MODS: Modifiers = Modifiers::CONTROL.union(Modifiers::ALT);
+const PTT_CODE: Code = Code::Space;
+const PTT_LABEL: &str = "Ctrl+Alt+Space";
 
 /// Everything that can wake the loop, funnelled through one channel. Tray and
 /// hotkey callbacks fire on OS background threads, so they forward into the
@@ -84,7 +87,7 @@ impl App {
         self.quit_item_id = Some(quit_item.id().clone());
 
         let tray = TrayIconBuilder::new()
-            .with_tooltip(format!("Holler — hold {PTT_KEY:?} to talk"))
+            .with_tooltip(format!("Holler — hold {PTT_LABEL} to talk"))
             .with_icon(placeholder_icon())
             .with_menu(Box::new(menu))
             .build()
@@ -103,7 +106,7 @@ impl App {
 
         // --- Global hotkey (PTT) ---
         let manager = GlobalHotKeyManager::new().expect("create global-hotkey manager");
-        let ptt = HotKey::new(None, PTT_KEY);
+        let ptt = HotKey::new(Some(PTT_MODS), PTT_CODE);
         self.ptt_hotkey_id = ptt.id();
         manager.register(ptt).expect("register PTT hotkey");
         self.hotkeys = Some(manager);
@@ -125,7 +128,7 @@ impl App {
             })
             .expect("spawn hotkey forwarder thread");
 
-        println!("[holler] ready — hold {PTT_KEY:?} to talk; tray menu → Quit to exit.");
+        println!("[holler] ready — hold {PTT_LABEL} to talk; tray menu → Quit to exit.");
     }
 
     fn on_hotkey(&mut self, event: GlobalHotKeyEvent) {
