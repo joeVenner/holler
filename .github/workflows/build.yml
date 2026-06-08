@@ -1,0 +1,186 @@
+name: Build & Package
+
+on:
+  push:
+    branches: [main, "feature/**"]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ─── macOS ──────────────────────────────────────────────────────────────────
+  build-macos:
+    name: macOS (Apple Silicon + Intel)
+    runs-on: macos-15
+    strategy:
+      matrix:
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Run tests
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: cargo test --target ${{ matrix.target }}
+
+      - name: Bundle .app (ad-hoc signed)
+        run: |
+          ARCH=${{ matrix.target }}
+          cp target/$ARCH/release/holler target/release/holler 2>/dev/null || \
+            cp target/$ARCH/release/holler /tmp/holler-bin
+          # Copy binary where the bundle script expects it.
+          mkdir -p target/release
+          cp target/$ARCH/release/holler target/release/holler
+          bash scripts/bundle-macos.sh
+          mv Holler.app Holler-$ARCH.app
+
+      - name: Create DMG
+        run: |
+          ARCH=${{ matrix.target }}
+          hdiutil create -volname Holler \
+            -srcfolder Holler-$ARCH.app \
+            -ov -format UDZO \
+            Holler-$ARCH.dmg
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: Holler-macOS-${{ matrix.target }}
+          path: Holler-${{ matrix.target }}.dmg
+
+  # ─── Universal macOS DMG (arm64 + x86_64 fat binary) ───────────────────────
+  build-macos-universal:
+    name: macOS Universal (fat binary)
+    needs: build-macos
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-universal-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build both arches
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+
+      - name: Lipo into universal binary
+        run: |
+          mkdir -p target/universal-apple-darwin/release
+          lipo -create \
+            target/aarch64-apple-darwin/release/holler \
+            target/x86_64-apple-darwin/release/holler \
+            -output target/universal-apple-darwin/release/holler
+
+      - name: Bundle universal .app
+        run: |
+          cp target/universal-apple-darwin/release/holler target/release/holler
+          bash scripts/bundle-macos.sh
+
+      - name: Create universal DMG
+        run: |
+          hdiutil create -volname Holler \
+            -srcfolder Holler.app \
+            -ov -format UDZO \
+            Holler-macOS-universal.dmg
+
+      - name: Upload universal DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: Holler-macOS-universal
+          path: Holler-macOS-universal.dmg
+
+  # ─── Windows ────────────────────────────────────────────────────────────────
+  build-windows:
+    name: Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binary
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Run tests
+        run: cargo test --target x86_64-pc-windows-msvc
+
+      - name: Package ZIP
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force
+          Copy-Item target\x86_64-pc-windows-msvc\release\holler.exe dist\
+          Compress-Archive -Path dist\* -DestinationPath Holler-Windows-x64.zip
+
+      - name: Upload Windows ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Holler-Windows-x64
+          path: Holler-Windows-x64.zip
+
+  # ─── Release (tags only) ────────────────────────────────────────────────────
+  release:
+    name: Create GitHub Release
+    needs: [build-macos-universal, build-windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Holler-macOS-universal.dmg
+            Holler-Windows-x64.zip
+          generate_release_notes: true
