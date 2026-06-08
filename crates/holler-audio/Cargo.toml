@@ -9,3 +9,4 @@ description = "Holler audio capture: cpal microphone capture gated by push-to-ta
 [dependencies]
 cpal = "0.18.1"
 rubato = "3.0.0"
+webrtc-vad = "0.4.0"
