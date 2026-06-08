@@ -1240,6 +1240,7 @@ name = "holler-config"
 version = "0.0.0"
 dependencies = [
  "directories",
+ "global-hotkey",
  "serde",
  "toml 1.1.2+spec-1.1.0",
 ]

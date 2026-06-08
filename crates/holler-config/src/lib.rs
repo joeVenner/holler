@@ -5,6 +5,9 @@
 //! `#[serde(default)]` makes every field optional, so older/newer config files
 //! load without error and missing fields fall back to defaults.
 
+pub mod ptt;
+pub use ptt::parse_ptt_key;
+
 use std::fs;
 use std::path::PathBuf;
 

@@ -17,10 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arboard::Clipboard;
-use global_hotkey::{
-    hotkey::{Code, HotKey, Modifiers},
-    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
-};
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use holler_audio::AudioCapture;
 use holler_config::Config;
 use holler_inject::{InjectMode, Injector};
@@ -52,13 +49,6 @@ enum TrayState {
 /// Lower idle RSS — the whole point of a tray-resident app (PLAN.md §6).
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
-
-/// PTT trigger. `Ctrl+Alt+Space` has no OS conflicts (unlike the function
-/// keys, which macOS hijacks for media), works on every keyboard, and is
-/// comfortable to hold. Becomes user-configurable in Phase 1 (DECISIONS #2).
-const PTT_MODS: Modifiers = Modifiers::CONTROL.union(Modifiers::ALT);
-const PTT_CODE: Code = Code::Space;
-const PTT_LABEL: &str = "Ctrl+Alt+Space";
 
 /// Everything that can wake the loop, funnelled through one channel. Tray and
 /// hotkey callbacks fire on OS background threads, so they forward into the
@@ -168,8 +158,11 @@ impl App {
         self.history_item_id = Some(history_item.id().clone());
         self.quit_item_id = Some(quit_item.id().clone());
 
+        // Parse the PTT combo from config; falls back to Ctrl+Alt+Space on error.
+        let (ptt_hotkey, ptt_label) = holler_config::parse_ptt_key(&self.config.ptt_key);
+
         let tray = TrayIconBuilder::new()
-            .with_tooltip(format!("Holler — hold {PTT_LABEL} to talk"))
+            .with_tooltip(format!("Holler — hold {ptt_label} to talk"))
             .with_icon(state_icon(TrayState::Idle, 0))
             .with_menu(Box::new(menu))
             .build()
@@ -188,9 +181,8 @@ impl App {
 
         // --- Global hotkey (PTT) ---
         let manager = GlobalHotKeyManager::new().expect("create global-hotkey manager");
-        let ptt = HotKey::new(Some(PTT_MODS), PTT_CODE);
-        self.ptt_hotkey_id = ptt.id();
-        manager.register(ptt).expect("register PTT hotkey");
+        self.ptt_hotkey_id = ptt_hotkey.id();
+        manager.register(ptt_hotkey).expect("register PTT hotkey");
         self.hotkeys = Some(manager);
 
         // `global-hotkey` has no callback API — only a static channel. Drain it
@@ -210,7 +202,7 @@ impl App {
             })
             .expect("spawn hotkey forwarder thread");
 
-        println!("[holler] ready — hold {PTT_LABEL} to talk; tray menu → Quit to exit.");
+        println!("[holler] ready — hold {ptt_label} to talk; tray menu → Quit to exit.");
     }
 
     fn on_hotkey(&mut self, event: GlobalHotKeyEvent) {
