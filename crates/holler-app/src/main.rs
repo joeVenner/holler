@@ -14,6 +14,7 @@ use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
 };
+use holler_audio::AudioCapture;
 use mimalloc::MiMalloc;
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuId, MenuItem},
@@ -59,6 +60,9 @@ struct App {
     /// True while the PTT key is physically held. The edge detector that makes
     /// this the source of truth is what debounces OS key auto-repeat.
     ptt_held: bool,
+    /// The live mic capture, present only between PTT down and up. cpal's
+    /// `Stream` is `!Send`, so this (and `App`) stay on the main thread.
+    capture: Option<AudioCapture>,
 }
 
 impl App {
@@ -70,6 +74,7 @@ impl App {
             ptt_hotkey_id: 0,
             quit_item_id: None,
             ptt_held: false,
+            capture: None,
         }
     }
 
@@ -139,14 +144,32 @@ impl App {
             HotKeyState::Pressed => {
                 if !self.ptt_held {
                     self.ptt_held = true;
-                    println!("[holler] PTT DOWN");
+                    // Open the mic only for the duration of the hold (PLAN.md §6).
+                    match AudioCapture::start() {
+                        Ok(capture) => {
+                            self.capture = Some(capture);
+                            println!("[holler] PTT DOWN — recording…");
+                        }
+                        Err(e) => eprintln!("[holler] could not start capture: {e}"),
+                    }
                 }
                 // else: OS key auto-repeat while held — debounced (ignored).
             }
             HotKeyState::Released => {
                 if self.ptt_held {
                     self.ptt_held = false;
-                    println!("[holler] PTT UP");
+                    match self.capture.take() {
+                        Some(capture) => match capture.stop() {
+                            // Phase 1 stops here; STT consumes `rec.samples` next.
+                            Ok(rec) => println!(
+                                "[holler] PTT UP — captured {:.2}s, {} samples @ 16kHz mono",
+                                rec.duration_secs,
+                                rec.samples.len()
+                            ),
+                            Err(e) => eprintln!("[holler] capture failed: {e}"),
+                        },
+                        None => println!("[holler] PTT UP"),
+                    }
                 }
             }
         }
