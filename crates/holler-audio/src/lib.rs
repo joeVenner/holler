@@ -20,6 +20,7 @@
 use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use webrtc_vad::{SampleRate as VadRate, Vad, VadMode};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample, StreamConfig};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{
@@ -273,6 +274,45 @@ fn resample_to_16k(mono: &[f32], src_rate: u32) -> Result<Vec<f32>, AudioError> 
     Ok(outdata[start..end].to_vec())
 }
 
+/// Frame size for VAD classification: 30 ms at 16 kHz.
+const VAD_FRAME: usize = 480;
+
+/// Trim leading and trailing silence from a 16 kHz mono f32 buffer using
+/// WebRTC VAD. Returns the original if no speech is found (never an empty clip).
+pub fn vad_trim(samples: &[f32]) -> Vec<f32> {
+    if samples.len() < VAD_FRAME {
+        return samples.to_vec();
+    }
+
+    let mut vad = Vad::new_with_rate_and_mode(VadRate::Rate16kHz, VadMode::Quality);
+
+    let frames: Vec<bool> = samples
+        .chunks(VAD_FRAME)
+        .map(|chunk| {
+            if chunk.len() < VAD_FRAME {
+                return false;
+            }
+            let i16_frame: Vec<i16> = chunk
+                .iter()
+                .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+                .collect();
+            vad.is_voice_segment(&i16_frame).unwrap_or(false)
+        })
+        .collect();
+
+    let first = frames.iter().position(|&v| v);
+    let last = frames.iter().rposition(|&v| v);
+
+    match (first, last) {
+        (Some(f), Some(l)) => {
+            let start = f * VAD_FRAME;
+            let end = ((l + 1) * VAD_FRAME).min(samples.len());
+            samples[start..end].to_vec()
+        }
+        _ => samples.to_vec(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +347,71 @@ mod tests {
         assert!(
             diff <= 256,
             "expected ~{expected} samples, got {} (diff {diff})",
+            out.len()
+        );
+    }
+
+    /// Build a synthetic "speech-like" signal: a mix of 300 Hz and 900 Hz
+    /// sines at 0.8 amplitude, covering two voice sub-bands so WebRTC VAD
+    /// in Quality mode reliably classifies it as active voice.
+    fn speech_frame() -> Vec<f32> {
+        (0..VAD_FRAME)
+            .map(|i| {
+                let t = i as f32 / 16_000.0;
+                let s = 0.8 * ((2.0 * std::f32::consts::PI * 300.0 * t).sin()
+                    + 0.5 * (2.0 * std::f32::consts::PI * 900.0 * t).sin());
+                s.clamp(-1.0, 1.0)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn vad_trim_all_silence_returns_original() {
+        // All-zero buffer → no voice found → original returned unchanged.
+        let silence = vec![0.0f32; VAD_FRAME * 10];
+        let out = vad_trim(&silence);
+        assert_eq!(out.len(), silence.len());
+    }
+
+    #[test]
+    fn vad_trim_speech_padded_with_silence_is_shorter() {
+        // 5 silent frames + 10 speech frames + 5 silent frames.
+        // After trim the output must be shorter than the padded input.
+        let silent = vec![0.0f32; VAD_FRAME];
+        let speech = speech_frame();
+        let mut padded = Vec::new();
+        for _ in 0..5 {
+            padded.extend_from_slice(&silent);
+        }
+        for _ in 0..10 {
+            padded.extend_from_slice(&speech);
+        }
+        for _ in 0..5 {
+            padded.extend_from_slice(&silent);
+        }
+        let out = vad_trim(&padded);
+        assert!(
+            out.len() < padded.len(),
+            "expected trim to shorten the buffer (padded={}, out={})",
+            padded.len(),
+            out.len()
+        );
+    }
+
+    #[test]
+    fn vad_trim_all_speech_not_shortened() {
+        // 20 continuous speech frames → no silence to trim, output ≈ input length.
+        let speech = speech_frame();
+        let mut all_speech = Vec::new();
+        for _ in 0..20 {
+            all_speech.extend_from_slice(&speech);
+        }
+        let out = vad_trim(&all_speech);
+        // Allow one frame of rounding slack at either end.
+        assert!(
+            out.len() >= all_speech.len() - VAD_FRAME,
+            "speech-only buffer shrank too much: {} → {}",
+            all_speech.len(),
             out.len()
         );
     }

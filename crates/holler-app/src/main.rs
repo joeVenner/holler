@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use arboard::Clipboard;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
-use holler_audio::AudioCapture;
+use holler_audio::{AudioCapture, Recording};
 use holler_config::Config;
 use holler_inject::{InjectMode, Injector};
 use holler_stt::{DeepgramStt, OpenAiStt, SttProvider};
@@ -232,6 +232,7 @@ impl App {
                         Some(capture) => match capture.stop() {
                             Ok(rec) => {
                                 self.set_tray_state(TrayState::Processing);
+                                let rec = self.maybe_vad_trim(rec);
                                 self.transcribe(rec);
                             }
                             Err(e) => {
@@ -244,6 +245,23 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Optionally trim leading/trailing silence via WebRTC VAD when `config.vad`
+    /// is enabled. Logs the pre/post sample counts for diagnostics.
+    fn maybe_vad_trim(&self, rec: Recording) -> Recording {
+        if !self.config.vad {
+            return rec;
+        }
+        let before = rec.samples.len();
+        let samples = holler_audio::vad_trim(&rec.samples);
+        let after = samples.len();
+        if after < before {
+            let trimmed_secs = (before - after) as f32 / 16_000.0;
+            println!("[holler] VAD: trimmed {trimmed_secs:.2}s of silence");
+        }
+        let duration_secs = samples.len() as f32 / 16_000.0;
+        Recording { samples, duration_secs }
     }
 
     /// Transcribe a finished recording on a worker thread (never block the

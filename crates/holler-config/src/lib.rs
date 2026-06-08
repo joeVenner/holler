@@ -17,8 +17,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Push-to-talk combo, e.g. "ctrl+alt+space". (Parsed by the app later;
-    /// currently informational — the hotkey is still compiled in.)
+    /// Push-to-talk combo, e.g. "ctrl+alt+space".
     pub ptt_key: String,
     /// STT provider: "deepgram" or "openai".
     pub stt_provider: String,
@@ -26,6 +25,13 @@ pub struct Config {
     pub stt_model: String,
     /// Injection strategy: "paste" or "type".
     pub injection_mode: String,
+    /// Whether to trim leading/trailing silence via WebRTC VAD before STT.
+    #[serde(default = "default_true")]
+    pub vad: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -35,6 +41,7 @@ impl Default for Config {
             stt_provider: "deepgram".to_string(),
             stt_model: String::new(),
             injection_mode: "paste".to_string(),
+            vad: true,
         }
     }
 }
