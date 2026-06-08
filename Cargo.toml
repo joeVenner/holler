@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/holler-app"]
+members = ["crates/holler-app", "crates/holler-audio"]
 
 [workspace.package]
 version = "0.0.0"

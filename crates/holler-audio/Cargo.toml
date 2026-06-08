@@ -1,0 +1,11 @@
+[package]
+name = "holler-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Holler audio capture: cpal microphone capture gated by push-to-talk, downmixed and resampled to 16 kHz mono f32 for STT."
+
+[dependencies]
+cpal = "0.18.1"
+rubato = "3.0.0"
