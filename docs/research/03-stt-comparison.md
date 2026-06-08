@@ -88,7 +88,7 @@
 1. Default **local whisper.cpp via whisper-rs + `large-v3-turbo`** (Metal/CUDA/CPU). Private, no cost, no network.
 2. Offer **cloud opt-in** (Deepgram or gpt-4o-mini) for weak HW / max accuracy. gpt-4o-mini cheapest accurate batch; Deepgram for live interim words.
 3. Auto-select model size by detected hardware.
-**→ This is Talker's STT decision.**
+**→ This is Holler's STT decision.**
 
 ---
 

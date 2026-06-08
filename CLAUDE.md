@@ -1,14 +1,14 @@
-# Talker — Project North Star (read this first)
+# Holler — Project North Star (read this first)
 
 > **User:** Yassir. **Philosophy:** readability > cleverness; small iterative changes; ask instead of assuming; challenge suboptimal paths before coding (see global `~/.claude/CLAUDE.md`).
 
-**Talker** is a cross-platform (Windows + macOS), memory-efficient, Rust **push-to-talk dictation** desktop app — a "walkie-talkie for your agents." Hold a keyboard combo, speak; on release the audio is transcribed (local-first, cloud opt-in), optionally cleaned up by an LLM, then **injected at the active cursor** and **copied to the clipboard + a searchable local history**. TTS read-back comes later.
+**Holler** is a cross-platform (Windows + macOS), memory-efficient, Rust **push-to-talk dictation** desktop app — a "walkie-talkie for your agents." Hold a keyboard combo, speak; on release the audio is transcribed (local-first, cloud opt-in), optionally cleaned up by an LLM, then **injected at the active cursor** and **copied to the clipboard + a searchable local history**. TTS read-back comes later.
 
 ---
 
-## 🏷️ Naming: project renamed **Talker → Holler** (2026-06-08)
+## 🏷️ Naming: renamed **Talker → Holler** (2026-06-08, full sweep)
 
-The product/binary/workspace are now **`holler`** (crates `holler-app`, future `holler-core`, …). The repo directory and the planning docs (`PLAN.md`, `DECISIONS.md`, `research/`) still say "Talker"/`talker-*` — a full rename sweep is pending Yassir's call (see open question in chat). Treat any `talker-*` crate name in the docs as `holler-*`.
+Originally planned as "Talker"; renamed to **Holler** before the first code. Product/binary/workspace are `holler`; crates are `holler-app` (and future `holler-core`, `holler-audio`, …). Code, docs, and the repo directory have all been swept. (Historical "Talker" mentions may linger in git history.)
 
 ## ⚠️ Status: PHASE 0 SCAFFOLD DONE — awaiting interactive verification
 

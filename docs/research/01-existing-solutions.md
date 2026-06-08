@@ -87,7 +87,7 @@ Research to inform a new cross-platform (Windows + macOS) Rust desktop dictation
 
 | Concern | Recommended approach |
 |---|---|
-| App framework | Tauri 2 (ecosystem default) — **but Talker chose native tray for leanness** |
+| App framework | Tauri 2 (ecosystem default) — **but Holler chose native tray for leanness** |
 | Audio capture | `cpal` + `rubato` → 16 kHz mono |
 | Global hotkey | `rdev` (PTT/mouse, macOS fork caveats) or `tauri-plugin-global-shortcut`/`global-hotkey` (simpler). Open-Less goes OS-native |
 | VAD | Silero via `vad-rs` |

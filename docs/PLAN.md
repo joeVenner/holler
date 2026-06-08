@@ -1,4 +1,4 @@
-# Talker — Implementation Plan
+# Holler — Implementation Plan
 
 > Source of truth for architecture and roadmap. Decisions live in `DECISIONS.md`; sourced research in `research/`.
 
@@ -49,29 +49,29 @@ macOS: `global-hotkey` + `tray-icon` both require the main-thread event loop; `e
 | Injection | `enigo` (0.5.x) + `arboard` | enigo `text()` for Unicode typing; `key()` for Cmd/Ctrl+V |
 | History/config store | `rusqlite` (bundled) | Searchable local history |
 | Secrets | `keyring` | API keys in OS keychain — never in TOML |
-| Config | `serde` + `toml` + `directories` | `~/.config/talker/` (XDG) / `~/Library/Application Support/Talker` |
+| Config | `serde` + `toml` + `directories` | `~/.config/holler/` (XDG) / `~/Library/Application Support/Holler` |
 | Allocator | `mimalloc` | `#[global_allocator]`, lower idle RSS |
 | Async | `tokio` | Network providers |
 
 ## 3. Module layout (Cargo workspace)
 
 ```
-talker/
+holler/
 ├─ Cargo.toml                 # [workspace]
 ├─ CLAUDE.md
 ├─ docs/
 └─ crates/
-   ├─ talker-core/   # PTT state machine, session pipeline orchestration, events
-   ├─ talker-audio/  # cpal capture, rubato resample, (1.5) Silero VAD trim
-   ├─ talker-stt/    # trait SttProvider { transcribe(samples) }; LocalWhisper, Deepgram, OpenAI
-   ├─ talker-llm/    # trait LlmProvider { cleanup(text, mode) }; Claude, OpenAI, OpenAICompatible(local)
-   ├─ talker-inject/ # trait Injector { insert(text) }; clipboard-paste → keystroke → manual
-   ├─ talker-store/  # SQLite history + TOML config + keyring secrets
-   └─ talker-app/    # binary: winit loop + tray + hotkey; (phase 2) egui settings
+   ├─ holler-core/   # PTT state machine, session pipeline orchestration, events
+   ├─ holler-audio/  # cpal capture, rubato resample, (1.5) Silero VAD trim
+   ├─ holler-stt/    # trait SttProvider { transcribe(samples) }; LocalWhisper, Deepgram, OpenAI
+   ├─ holler-llm/    # trait LlmProvider { cleanup(text, mode) }; Claude, OpenAI, OpenAICompatible(local)
+   ├─ holler-inject/ # trait Injector { insert(text) }; clipboard-paste → keystroke → manual
+   ├─ holler-store/  # SQLite history + TOML config + keyring secrets
+   └─ holler-app/    # binary: winit loop + tray + hotkey; (phase 2) egui settings
 ```
 Provider traits are the key abstraction: local/cloud and Claude/OpenAI/local swap by config without touching the pipeline.
 
-## 4. PTT session state machine (talker-core)
+## 4. PTT session state machine (holler-core)
 ```
 Idle --key down--> Recording (cpal stream open, push samples to ring buffer)
 Recording --key up--> Processing (close stream; resample; [VAD trim]; STT; [LLM cleanup])
@@ -89,10 +89,10 @@ Tray icon reflects state (idle/recording/processing). Debounce auto-repeat `Pres
 - Exit criteria: hold key → "DOWN" logged once; release → "UP" logged once; tray menu quits cleanly.
 
 ### Phase 1 — Core local dictation loop (MVP)
-- `talker-audio`: cpal capture gated by hold → ring buffer → rubato 16k mono f32.
-- `talker-stt`: `LocalWhisper` via `whisper-rs` (`large-v3-turbo`, metal/CPU), transcribe on release.
-- `talker-inject`: clipboard-paste primary + keystroke fallback + manual fallback.
-- `talker-store`: set clipboard (`arboard`) + SQLite history insert; TOML config; keyring scaffold.
+- `holler-audio`: cpal capture gated by hold → ring buffer → rubato 16k mono f32.
+- `holler-stt`: `LocalWhisper` via `whisper-rs` (`large-v3-turbo`, metal/CPU), transcribe on release.
+- `holler-inject`: clipboard-paste primary + keystroke fallback + manual fallback.
+- `holler-store`: set clipboard (`arboard`) + SQLite history insert; TOML config; keyring scaffold.
 - Config: PTT combo, model tier (auto-detect default), injection mode.
 - **Exit criteria: hold key, talk, release → text appears at cursor, on clipboard, in history — fully offline.**
 

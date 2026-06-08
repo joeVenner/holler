@@ -16,7 +16,7 @@ Cross-platform (Windows + macOS), memory-efficient, background/tray-resident. Co
 | Higher-level glue (optional) | **`voice-stream`** (cpal + rubato + Silero) | Fast path; check build health |
 | Allocator | **`mimalloc`** | Lower RSS/fragmentation for long-idle process |
 
-Biggest decision: **mouse-button PTT forces `rdev`** (macOS Accessibility burden). Decide early. **Talker decision: keyboard-only → `global-hotkey`.**
+Biggest decision: **mouse-button PTT forces `rdev`** (macOS Accessibility burden). Decide early. **Holler decision: keyboard-only → `global-hotkey`.**
 
 ---
 
@@ -58,7 +58,7 @@ PTT needs reliable global **key-down (start)** + **key-up (stop)**.
 - `global-hotkey` (registered hotkeys) generally **no** Accessibility/Input-Monitoring needed for plain keyboard hotkeys.
 - `rdev`/any raw tap needs **Accessibility** (+ effectively Input Monitoring), must be signed/notarized to prompt cleanly, fails silently if denied. Main cost of mouse/raw-hold PTT.
 
-**Recommendation:** keyboard PTT → **`global-hotkey` v0.8** (debounce auto-repeat, defensive `Released`). Mouse/raw → **`rdev`** + first-run macOS Accessibility flow. **Talker: keyboard-only.**
+**Recommendation:** keyboard PTT → **`global-hotkey` v0.8** (debounce auto-repeat, defensive `Released`). Mouse/raw → **`rdev`** + first-run macOS Accessibility flow. **Holler: keyboard-only.**
 
 ---
 
@@ -105,4 +105,4 @@ PTT needs reliable global **key-down (start)** + **key-up (stop)**.
 ## Sources
 Tauri vs Electron: tech-insider.org, johal.in, gethopp.app, tauri issue #5889. Tray: v2.tauri.app system-tray, discussions #6038/#10774, docs.rs/tray-icon, muda. GUI survey: boringcactus.com 2025. Hotkeys: github.com/tauri-apps/global-hotkey, docs.rs/global-hotkey, v2.tauri.app global-shortcut, issues #4364/#39, plugins-workspace #3378. rdev: docs.rs/rdev, github.com/Narsil/rdev, lib.rs. Audio: cpal #788/#753, docs.rs/rubato. VAD: docs.rs/voice_activity_detector, docs.rs/voice-stream, github.com/wavekat/wavekat-vad, snakers4/silero-vad. Memory: framequery.com mimalloc, leapcell jemalloc, oneuptime.com Rust memory.
 
-> **Peer-review note:** the mouse-button-PTT requirement is the fork in the road. Keyboard PTT keeps the macOS permission story clean and avoids rdev's silent-failure trap. If mouse is ever required, abstract the hotkey layer behind a trait so global-hotkey/rdev swap without touching the rest. **Talker chose keyboard-only for v1, trait-abstract later.**
+> **Peer-review note:** the mouse-button-PTT requirement is the fork in the road. Keyboard PTT keeps the macOS permission story clean and avoids rdev's silent-failure trap. If mouse is ever required, abstract the hotkey layer behind a trait so global-hotkey/rdev swap without touching the rest. **Holler chose keyboard-only for v1, trait-abstract later.**

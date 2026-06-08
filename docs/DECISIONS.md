@@ -1,4 +1,4 @@
-# Talker — Decisions Log
+# Holler — Decisions Log
 
 Captured during the planning session on **2026-06-08** with Yassir. These are **locked** unless Yassir reopens them. Do not re-litigate during implementation.
 
