@@ -1,0 +1,12 @@
+[package]
+name = "holler-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Holler configuration: TOML config (PTT combo, STT provider/model, injection mode) in the OS config dir. No secrets — keys live in the keychain."
+
+[dependencies]
+directories = "6.0.0"
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "1.1.2"

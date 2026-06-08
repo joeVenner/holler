@@ -1,0 +1,11 @@
+[package]
+name = "holler-inject"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Holler text injection: clipboard-paste primary, keystroke fallback, manual fallback."
+
+[dependencies]
+arboard = "3.6.1"
+enigo = "0.6.1"

@@ -1,0 +1,11 @@
+[package]
+name = "holler-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Holler local store: system clipboard + searchable SQLite transcript history."
+
+[dependencies]
+directories = "6.0.0"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
