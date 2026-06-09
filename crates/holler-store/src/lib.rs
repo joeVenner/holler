@@ -4,7 +4,7 @@
 //! this crate is pure persistence so it's testable without a display.
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use directories::ProjectDirs;
 use rusqlite::{params, Connection};
@@ -67,6 +67,10 @@ impl History {
     }
 
     fn from_connection(conn: Connection) -> Result<Self, StoreError> {
+        // Briefly retry on a locked DB (a second instance, a backup/sync tool)
+        // rather than instantly failing — a dropped transcript would be lost.
+        conn.busy_timeout(Duration::from_secs(5))
+            .map_err(|e| StoreError::Db(e.to_string()))?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS transcripts (
                 id         INTEGER PRIMARY KEY,
