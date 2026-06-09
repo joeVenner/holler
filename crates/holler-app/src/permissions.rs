@@ -27,8 +27,12 @@ pub fn open_accessibility_settings() {
     }
     #[cfg(target_os = "windows")]
     {
-        // Windows doesn't have an equivalent grant flow for enigo.
-        let _ = std::process::Command::new("ms-settings:privacy-general").spawn();
+        // Windows has no Accessibility-style grant for enigo: input injection
+        // works without one and can only fail against windows running as
+        // Administrator (UIPI). `accessibility_granted()` returns true here, so
+        // the tray's grant item is disabled and this is effectively unreachable
+        // — just log instead of opening an unrelated Settings panel.
+        println!("[holler] Windows: auto-paste needs no permission; it can only fail against apps run as Administrator.");
     }
 }
 
@@ -42,6 +46,11 @@ pub fn open_mic_settings() {
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("ms-settings:privacy-microphone").spawn();
+        // `ms-settings:` is a URI protocol, not an executable — launch it via
+        // the shell handler (explorer.exe). Passing it straight to Command::new
+        // fails with ERROR_FILE_NOT_FOUND, so the tray action did nothing.
+        let _ = std::process::Command::new("explorer.exe")
+            .arg("ms-settings:privacy-microphone")
+            .spawn();
     }
 }
