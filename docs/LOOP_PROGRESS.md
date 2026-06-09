@@ -20,3 +20,4 @@ iteration. Rules + full task specs live in `docs/AUTOMODE.md`.
 ## Log
 - 2026-06-08 — task 1 (remappable PTT key) — b5a5cfb — build+clippy+tests green; 7 new parser tests
 - 2026-06-08 — task 2 (VAD silence trim) — e153ce7 — build+clippy+tests green; 3 new VAD tests
+- 2026-06-09 — loop 30mn tasks complete — b7392dd+8c28115 — overlay pre-render fix, CI bundle fix, missed Cargo.toml dep; 25 tests green; **LOOP STOPPED** (all tasks done; Phase 2 next)
