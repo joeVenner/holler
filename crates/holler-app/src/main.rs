@@ -1,3 +1,14 @@
+// On Windows, build the RELEASE binary as a GUI-subsystem app so launching it
+// from Explorer doesn't pop a persistent black console window — Holler is a
+// tray agent with no console (the macOS analog is Info.plist LSUIElement). Left
+// off in debug builds so `cargo run` keeps println!/eprintln! diagnostics.
+// Trade-off: under the windows subsystem, `holler.exe set-key …` run from a
+// terminal won't print to it (it still stores the key and exits correctly).
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 //! Holler — push-to-talk dictation.
 //!
 //! A SINGLE main-thread `winit` event loop owns the `tray-icon` and the
