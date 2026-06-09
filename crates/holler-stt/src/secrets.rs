@@ -15,8 +15,18 @@ pub fn store_key(account: &str, secret: &str) -> Result<(), Error> {
     Entry::new(SERVICE, account)?.set_password(secret)
 }
 
-/// Load the secret for `account` from the OS keychain.
+/// Load the secret for `account`.
+///
+/// Checks `HOLLER_<ACCOUNT_UPPER>_KEY` first (e.g. `HOLLER_DEEPGRAM_KEY`),
+/// so the user can export the key in their shell profile and skip keychain
+/// prompts entirely. Falls back to the OS keychain when the env var is absent.
 pub fn load_key(account: &str) -> Result<String, Error> {
+    let env_var = format!("HOLLER_{}_KEY", account.to_ascii_uppercase());
+    if let Ok(val) = std::env::var(&env_var) {
+        if !val.is_empty() {
+            return Ok(val);
+        }
+    }
     Entry::new(SERVICE, account)?.get_password()
 }
 

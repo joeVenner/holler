@@ -40,6 +40,9 @@ use overlay::Overlay;
 
 /// How often the tray animation advances a frame.
 const FRAME_INTERVAL: Duration = Duration::from_millis(90);
+/// How often to re-check Accessibility permission so the tray reflects reality
+/// without requiring a restart.
+const AX_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Visible tray state. `Idle` is static; the others animate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,9 +110,14 @@ struct App {
     accessibility_ok: bool,
     /// Avoid flooding the log with the same "grant Accessibility" note.
     accessibility_warned: bool,
-    /// Tray menu items for the permissions section.
+    /// Tray menu item IDs (for click routing).
     grant_access_item_id: Option<MenuId>,
     grant_mic_item_id: Option<MenuId>,
+    /// Retained menu items so we can update their text/enabled state at runtime.
+    ax_menu_item: Option<MenuItem>,
+    grant_access_menu_item: Option<MenuItem>,
+    /// Timestamp of the last AXIsProcessTrusted() check (rate-limits polling).
+    last_ax_check: Instant,
     /// Desktop recording indicator shown during PTT hold.
     overlay: Option<Overlay>,
 }
@@ -144,6 +152,9 @@ impl App {
             history_item_id: None,
             grant_access_item_id: None,
             grant_mic_item_id: None,
+            ax_menu_item: None,
+            grant_access_menu_item: None,
+            last_ax_check: Instant::now(),
             tray_state: TrayState::Idle,
             anim_frame: 0,
             ptt_held: false,
@@ -185,6 +196,9 @@ impl App {
         menu.append(&grant_mic_item).expect("append grant-mic item");
         self.grant_access_item_id = Some(grant_access_item.id().clone());
         self.grant_mic_item_id = Some(grant_mic_item.id().clone());
+        // Retain items so refresh_ax_status() can update their labels live.
+        self.ax_menu_item = Some(ax_item);
+        self.grant_access_menu_item = Some(grant_access_item);
 
         menu.append(&PredefinedMenuItem::separator()).expect("separator");
 
@@ -448,6 +462,32 @@ impl App {
         }
         self.injector.as_mut()
     }
+
+    /// Re-query AXIsProcessTrusted() and update the tray menu labels in-place
+    /// so the user sees the real status without restarting the app.
+    fn refresh_ax_status(&mut self) {
+        self.last_ax_check = Instant::now();
+        let granted = permissions::accessibility_granted();
+        if granted == self.accessibility_ok {
+            return;
+        }
+        self.accessibility_ok = granted;
+        self.accessibility_warned = false; // allow fresh log on next delivery
+        if let Some(item) = &self.ax_menu_item {
+            if granted {
+                item.set_text("✓  Accessibility (auto-paste active)");
+            } else {
+                item.set_text("✗  Accessibility (auto-paste disabled)");
+            }
+        }
+        if let Some(item) = &self.grant_access_menu_item {
+            item.set_enabled(!granted);
+        }
+        println!(
+            "[holler] Accessibility {}",
+            if granted { "granted — auto-paste active" } else { "revoked — clipboard fallback active" }
+        );
+    }
 }
 
 impl ApplicationHandler<UserEvent> for App {
@@ -469,15 +509,26 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
         }
+        // Re-check Accessibility on every loop wake, rate-limited. Guarded by
+        // hotkeys.is_some() so we don't poll before init() has run.
+        if self.hotkeys.is_some()
+            && Instant::now().duration_since(self.last_ax_check) >= AX_POLL_INTERVAL
+        {
+            self.refresh_ax_status();
+        }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // Schedule the next frame while animating; otherwise sleep until an
-        // event wakes us (no polling — PLAN.md §6).
-        if self.tray_state == TrayState::Idle {
-            event_loop.set_control_flow(ControlFlow::Wait);
-        } else {
+        if self.tray_state != TrayState::Idle {
+            // Animating — wake every frame.
             event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + FRAME_INTERVAL));
+        } else if !self.accessibility_ok {
+            // Waiting for the user to grant Accessibility — wake periodically
+            // so the tray label updates the moment permission is granted.
+            event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + AX_POLL_INTERVAL));
+        } else {
+            // Fully idle — sleep until an event arrives (no CPU burn).
+            event_loop.set_control_flow(ControlFlow::Wait);
         }
     }
 
@@ -497,7 +548,7 @@ impl ApplicationHandler<UserEvent> for App {
                     open_in_os(folder.as_deref());
                 } else if self.grant_access_item_id.as_ref() == Some(&e.id) {
                     permissions::open_accessibility_settings();
-                    println!("[holler] opened Accessibility settings — restart Holler after granting.");
+                    println!("[holler] opened Accessibility settings — tray updates automatically once granted.");
                 } else if self.grant_mic_item_id.as_ref() == Some(&e.id) {
                     permissions::open_mic_settings();
                 }
