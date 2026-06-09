@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Holler configuration: TOML config (PTT combo, STT provider/model, injection mode) in the OS config dir. No secrets — keys live in the keychain."
+description = "Holler configuration: TOML config (PTT combo, STT provider/model, injection mode) plus API keys in a separate secrets.toml, in the OS config dir."
 
 [dependencies]
 directories = "6.0.0"

@@ -3,7 +3,8 @@
 **/*.rs.bk
 *.pdb
 
-# Secrets — NEVER commit (keys live in the OS keychain via `keyring`)
+# Secrets — NEVER commit. API keys live in `secrets.toml` in the OS config dir
+# (not the repo), but ignore it here too in case one is created locally.
 .env
 *.env
 secrets.toml

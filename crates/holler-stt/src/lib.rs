@@ -9,8 +9,9 @@
 //! the main winit/event loop. The batch (transcribe-on-release) path doesn't
 //! benefit from async, so we use `reqwest::blocking` and skip a tokio runtime.
 //!
-//! API keys live in the **OS keychain** via [`store_key`] / each provider's
-//! `from_keychain` — never in config files.
+//! API keys live in a local **`secrets.toml`** (or the `HOLLER_<PROVIDER>_KEY`
+//! env var) via [`store_key`] / each provider's `from_stored_key` — managed by
+//! `holler-config`, never in `config.toml`.
 
 mod deepgram;
 mod openai;
@@ -36,7 +37,7 @@ pub trait SttProvider: Send + Sync {
 /// foreign error types.
 #[derive(Debug)]
 pub enum SttError {
-    /// No API key found in the keychain for this provider.
+    /// No API key configured for this provider (env var or `secrets.toml`).
     MissingKey(String),
     /// Encoding the audio to WAV failed.
     Encode(String),
@@ -51,7 +52,7 @@ pub enum SttError {
 impl std::fmt::Display for SttError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SttError::MissingKey(m) => write!(f, "no API key in keychain: {m}"),
+            SttError::MissingKey(m) => write!(f, "no API key configured for {m}"),
             SttError::Encode(m) => write!(f, "audio encode failed: {m}"),
             SttError::Http(m) => write!(f, "request failed: {m}"),
             SttError::Api(m) => write!(f, "transcription API error: {m}"),

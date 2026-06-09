@@ -23,7 +23,8 @@ impl DeepgramStt {
     /// the previous generation (only for languages nova-3 lacks); older models
     /// (`nova`, `enhanced`, `base`) are legacy.
     pub const DEFAULT_MODEL: &'static str = "nova-3";
-    /// The keychain account name this provider's key is stored under.
+    /// The account name this provider's key is stored under (env var /
+    /// `secrets.toml`).
     pub const KEY_ACCOUNT: &'static str = "deepgram";
 
     pub fn new(api_key: String, model: String) -> Self {
@@ -38,10 +39,10 @@ impl DeepgramStt {
         }
     }
 
-    /// Build from the API key stored in the OS keychain.
-    pub fn from_keychain(model: String) -> Result<Self, SttError> {
+    /// Build from the stored API key (env var or `secrets.toml`).
+    pub fn from_stored_key(model: String) -> Result<Self, SttError> {
         let api_key =
-            load_key(Self::KEY_ACCOUNT).map_err(|e| SttError::MissingKey(e.to_string()))?;
+            load_key(Self::KEY_ACCOUNT).ok_or_else(|| SttError::MissingKey(Self::KEY_ACCOUNT.into()))?;
         Ok(Self::new(api_key, model))
     }
 }

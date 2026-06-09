@@ -8,7 +8,7 @@
 //! transcription (a network call) runs on a spawned worker thread that posts
 //! the result back as a `UserEvent` via the `EventLoopProxy`.
 //!
-//! CLI: `holler set-key openai <KEY>` stores an API key in the OS keychain.
+//! CLI: `holler set-key openai <KEY>` stores an API key in `secrets.toml`.
 
 mod icons;
 mod overlay;
@@ -124,11 +124,9 @@ struct App {
 
 impl App {
     fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
-        // NB: no keychain access here. Reading a key can trigger a (blocking)
-        // OS keychain prompt; doing it on the launch path would freeze startup.
-        // The provider is resolved lazily on the worker thread at PTT-release.
-        // Config (filesystem) and history (SQLite) are prompt-free, so they're
-        // fine to load eagerly.
+        // Keys are resolved lazily on the worker thread at PTT-release, not
+        // here — so the launch path touches no secrets and stays snappy. Config
+        // (filesystem) and history (SQLite) are cheap, so they load eagerly.
         let config = holler_config::load_or_create().unwrap_or_else(|e| {
             eprintln!("[holler] config load failed ({e}); using defaults.");
             Config::default()
@@ -337,7 +335,7 @@ impl App {
     /// Transcribe a finished recording on a worker thread (never block the
     /// event loop on a network call or a keychain prompt) and post the result
     /// back via the proxy. Provider/model come from config; resolution (which
-    /// reads the keychain) happens off the main thread.
+    /// reads the stored key) happens off the main thread.
     fn transcribe(&self, rec: holler_audio::Recording) {
         println!(
             "[holler] PTT UP — captured {:.2}s, transcribing…",
@@ -600,7 +598,7 @@ fn open_in_os(path: Option<&Path>) {
 }
 
 fn main() {
-    // `holler set-key <provider> <KEY>` stores an API key in the OS keychain
+    // `holler set-key <provider> <KEY>` stores an API key in `secrets.toml`
     // and exits — no event loop. (A stopgap until the Phase-2 settings UI.)
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("set-key") {
@@ -620,21 +618,20 @@ fn main() {
     }
 }
 
-/// Build the configured STT provider (reading its key from the keychain).
-/// `model` overrides the provider default when `Some`. Returns `None` if the
-/// provider is unknown or has no stored key. Reads the keychain — call OFF the
-/// main thread.
+/// Build the configured STT provider (reading its key from `secrets.toml` or
+/// the env var). `model` overrides the provider default when `Some`. Returns
+/// `None` if the provider is unknown or has no stored key.
 fn build_provider(provider: &str, model: Option<String>) -> Option<Arc<dyn SttProvider>> {
     match provider {
         "deepgram" => {
             let m = model.unwrap_or_else(|| DeepgramStt::DEFAULT_MODEL.to_string());
-            DeepgramStt::from_keychain(m)
+            DeepgramStt::from_stored_key(m)
                 .ok()
                 .map(|p| Arc::new(p) as Arc<dyn SttProvider>)
         }
         "openai" => {
             let m = model.unwrap_or_else(|| OpenAiStt::DEFAULT_MODEL.to_string());
-            OpenAiStt::from_keychain(m)
+            OpenAiStt::from_stored_key(m)
                 .ok()
                 .map(|p| Arc::new(p) as Arc<dyn SttProvider>)
         }
@@ -657,7 +654,10 @@ fn run_set_key(args: &[String]) {
         std::process::exit(2);
     }
     match holler_stt::store_key(provider, key) {
-        Ok(()) => println!("[holler] stored {provider} API key in the OS keychain."),
+        Ok(()) => match holler_config::secrets_path() {
+            Ok(p) => println!("[holler] stored {provider} API key in {}.", p.display()),
+            Err(_) => println!("[holler] stored {provider} API key."),
+        },
         Err(e) => {
             eprintln!("[holler] failed to store key: {e}");
             std::process::exit(1);

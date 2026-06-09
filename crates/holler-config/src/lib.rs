@@ -1,12 +1,14 @@
 //! Holler configuration (Phase 1): a TOML file in the OS config dir holding
-//! non-secret settings. API keys are NOT here — they live in the keychain
-//! (`holler-stt::secrets`).
+//! non-secret settings. API keys are NOT here — they live in a separate
+//! `secrets.toml` (see [`secrets`]) so the config file stays safe to share.
 //!
 //! `#[serde(default)]` makes every field optional, so older/newer config files
 //! load without error and missing fields fall back to defaults.
 
 pub mod ptt;
+pub mod secrets;
 pub use ptt::parse_ptt_key;
+pub use secrets::{load_secret, secrets_path, store_secret};
 
 use std::fs;
 use std::path::PathBuf;
@@ -75,11 +77,16 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+/// The Holler project directories (config/data) — shared by `config.toml` and
+/// `secrets.toml` so they always resolve to the same folder.
+pub(crate) fn project_dirs() -> Result<ProjectDirs, ConfigError> {
+    ProjectDirs::from("com", "Holler", "Holler")
+        .ok_or_else(|| ConfigError::Path("could not determine a config directory".into()))
+}
+
 /// `<config_dir>/Holler/config.toml`.
 pub fn config_path() -> Result<PathBuf, ConfigError> {
-    let dirs = ProjectDirs::from("com", "Holler", "Holler")
-        .ok_or_else(|| ConfigError::Path("could not determine a config directory".into()))?;
-    Ok(dirs.config_dir().join("config.toml"))
+    Ok(project_dirs()?.config_dir().join("config.toml"))
 }
 
 /// Load the config, creating a default file on first run.
