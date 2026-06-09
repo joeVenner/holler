@@ -16,7 +16,7 @@ Captured during the planning session on **2026-06-08** with Yassir. These are **
 | PTT trigger | Keyboard combo only | Clean `global-hotkey` path; avoids `rdev` + macOS Accessibility silent-failure. Mouse can be added later behind a trait. |
 | App shell | Native tray (`tray-icon`) + on-demand `egui` | Leanest idle RAM; no resident WebView. Tauri's Windows RAM win over Electron is marginal anyway. |
 | Copy memory | Clipboard set **and** searchable SQLite history | Yassir chose "Both". |
-| AI providers | Provider-agnostic/BYOK behind traits — Claude, OpenAI, Deepgram, local OpenAI-compatible (Ollama) | Flexibility; keys in OS keychain via `keyring`. |
+| AI providers | Provider-agnostic/BYOK behind traits — Claude, OpenAI, Deepgram, local OpenAI-compatible (Ollama) | Flexibility. **Key storage REVISED 2026-06-10:** moved from the OS keychain (`keyring`) to a `0600` `secrets.toml` in the config dir (separate from `config.toml`). Ad-hoc-signed macOS bundles change identity each rebuild, so the keychain TCC grant never stuck and macOS re-prompted on every run. `HOLLER_<PROVIDER>_KEY` env var overrides the file. |
 | TTS | Deferred to phase 3 | De-risk v1; design traits now, build later. |
 | Distribution | Public eventually → plan signing/notarization + permission onboarding from the start | Stable Developer ID; clean macOS TCC flow. |
 

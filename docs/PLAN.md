@@ -48,7 +48,7 @@ macOS: `global-hotkey` + `tray-icon` both require the main-thread event loop; `e
 | Cloud (STT/LLM/TTS) | `reqwest` (HTTP) + `tokio-tungstenite` (WS) | No vendor needs a Rust SDK |
 | Injection | `enigo` (0.5.x) + `arboard` | enigo `text()` for Unicode typing; `key()` for Cmd/Ctrl+V |
 | History/config store | `rusqlite` (bundled) | Searchable local history |
-| Secrets | `keyring` | API keys in OS keychain — never in TOML |
+| Secrets | `secrets.toml` (config dir, `0600`) | API keys in a separate file, never in `config.toml`; `HOLLER_<PROVIDER>_KEY` env override. (Was `keyring` — dropped; see DECISIONS 2026-06-10.) |
 | Config | `serde` + `toml` + `directories` | `~/.config/holler/` (XDG) / `~/Library/Application Support/Holler` |
 | Allocator | `mimalloc` | `#[global_allocator]`, lower idle RSS |
 | Async | `tokio` | Network providers |

@@ -12,6 +12,22 @@ Append hard-learned technical lessons and edge cases here, newest first, using t
 
 ---
 
+## [2026-06-10] Context Update — Cross-platform hardening + release readiness
+- **What changed:** Closed the gaps from a multi-agent review pass making Holler genuinely native on both macOS and Windows and cleanly releasable. Key edits:
+  - **API keys: keychain → `secrets.toml`** (`holler-config::secrets`, `0600` on Unix, env-var override). Dropped the `keyring` dependency entirely. Reverses the original DECISIONS.md "keys in keychain" choice (see that file).
+  - **P0 launch crashes fixed:** PTT hotkey registration now degrades gracefully instead of `.expect()`-aborting under `panic="abort"` (common on Windows when the combo is taken); added `#![cfg_attr(windows + release, windows_subsystem="windows")]` so the released exe doesn't pop a console.
+  - **Tray feedback:** failures (no key, mic, transcription, history) surface on the tray tooltip — a tray agent has no visible stderr.
+  - **Cross-platform parity:** Windows overlay skips the taskbar + created inactive; overlay position anchors to `monitor.position()` (multi-monitor); Windows `ms-settings:` launched via `explorer.exe`; platform-tuned clipboard settle (100ms Win / 60ms mac).
+  - **Correctness:** VAD keeps the trailing partial speech frame; empty/too-short clips and empty transcripts are guarded (no clipboard clobber / wasted API call); Deepgram `language=multi`; SQLite `busy_timeout`; no `.expect()` on the icon animation hot path.
+  - **Release:** workspace version → `0.1.0`; CI builds `--locked`; artifact version derived from the git tag; added `LICENSE-MIT`/`LICENSE-APACHE`.
+- **Why:** Dev/verification had been macOS-only; Windows was unproven and several `.expect()`s were latent first-run crashes under the release `panic="abort"` profile.
+- **Key lessons:**
+  - **`keyring` on an ad-hoc-signed macOS bundle is a trap:** identity changes each rebuild, so the TCC grant never sticks and macOS re-prompts for the login password every run. A `0600` file in the config dir is the pragmatic BYOK fix and removes a platform-divergent code path.
+  - Under `panic="abort"`, any `.expect()` reachable on the launch path or a timer callback is a silent hard crash for a tray app (no console). Audit them.
+  - winit window positions are in **global desktop space**, not primary-monitor-local — assuming a `(0,0)` origin breaks multi-monitor layouts. Use `MonitorHandle::position()`.
+  - `Command::new("ms-settings:…")` fails — a URI is not an executable; launch it via `explorer.exe`.
+- **Reference:** branch `feature/cross-platform-hardening`; review workflow `wf_dde89c44-8ad`; `docs/DECISIONS.md`.
+
 ## [2026-06-08] Context Update — Phase 1.5 VAD silence trim (webrtc-vad)
 - **What changed:** `holler_audio::vad_trim` trims leading/trailing silence from 16 kHz f32 recordings before STT using WebRTC VAD (Quality mode, 30 ms frames). Config gate `vad: bool` (default `true`) in `holler-config`. App logs trimmed seconds; skips VAD when disabled.
 - **Crate choice:** `webrtc-vad 0.4.0` over `voice_activity_detector` (Silero v5 via `ort`) — ONNX runtime footprint and download overhead not worth it for PTT use case. `webrtc-vad` compiles in ~3.6 s, has minimal deps, and the C FFI is stable. `!Send` raw pointer stays on the calling thread (function-local VAD instance, no cross-thread sharing).
