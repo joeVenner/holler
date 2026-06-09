@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use softbuffer::{Context, Surface};
 use winit::{
-    dpi::{LogicalPosition, LogicalSize},
+    dpi::{LogicalSize, PhysicalPosition},
     event_loop::ActiveEventLoop,
     window::{Window, WindowAttributes, WindowLevel},
 };
@@ -40,23 +40,39 @@ impl Overlay {
         let monitor = event_loop.primary_monitor()
             .or_else(|| event_loop.available_monitors().next())?;
 
+        // Anchor to the monitor's own desktop-space origin (not an assumed
+        // (0,0)) so multi-monitor layouts — where the primary can sit at a
+        // positive/negative offset — still place the pill on the right screen.
+        // Work in physical pixels to match the scaled inner size.
         let monitor_size = monitor.size();
         let scale = monitor.scale_factor();
-        let logical_w = monitor_size.width as f64 / scale;
-        let logical_h = monitor_size.height as f64 / scale;
+        let origin = monitor.position();
+        let win_w = (WIDTH as f64 * scale) as i32;
+        let win_h = (HEIGHT as f64 * scale) as i32;
+        let margin = (40.0 * scale) as i32; // 40 px from the bottom edge
 
-        // Bottom-centre, 40 px from the bottom edge.
-        let x = (logical_w / 2.0 - WIDTH as f64 / 2.0) as i32;
-        let y = (logical_h - HEIGHT as f64 - 40.0) as i32;
+        // Bottom-centre of this monitor.
+        let x = origin.x + (monitor_size.width as i32 - win_w) / 2;
+        let y = origin.y + monitor_size.height as i32 - win_h - margin;
 
         let attrs = WindowAttributes::default()
             .with_title("Holler Overlay")
             .with_inner_size(LogicalSize::new(WIDTH, HEIGHT))
-            .with_position(LogicalPosition::new(x, y))
+            .with_position(PhysicalPosition::new(x, y))
             .with_decorations(false)
             .with_resizable(false)
             .with_window_level(WindowLevel::AlwaysOnTop)
             .with_visible(false);
+
+        // Windows-only parity with the macOS ornamental overlay: keep it out of
+        // the taskbar and don't let it steal focus from the field about to be
+        // pasted into. (macOS doesn't show a taskbar button or take key focus
+        // for a borderless always-on-top window, so this is gated to Windows.)
+        #[cfg(target_os = "windows")]
+        let attrs = {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attrs.with_skip_taskbar(true).with_active(false)
+        };
 
         let window = Arc::new(event_loop.create_window(attrs).ok()?);
         let ctx = Context::new(window.clone()).ok()?;
