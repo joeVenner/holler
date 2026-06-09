@@ -236,7 +236,7 @@ impl App {
 
         let tray = TrayIconBuilder::new()
             .with_tooltip(format!("Holler — hold {ptt_label} to talk"))
-            .with_icon(state_icon(TrayState::Idle, 0))
+            .with_icon(state_icon(TrayState::Idle, 0).expect("build initial tray icon"))
             .with_menu(Box::new(menu))
             .build()
             .expect("build tray icon");
@@ -494,8 +494,9 @@ impl App {
 
     /// Draw the current state/frame into the tray icon.
     fn render_tray(&self) {
-        if let Some(tray) = &self.tray {
-            let _ = tray.set_icon(Some(state_icon(self.tray_state, self.anim_frame)));
+        if let (Some(tray), Some(icon)) = (&self.tray, state_icon(self.tray_state, self.anim_frame))
+        {
+            let _ = tray.set_icon(Some(icon));
         }
     }
 
@@ -653,13 +654,18 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 /// Build the tray `Icon` for a state + animation frame (see `icons.rs`).
-fn state_icon(state: TrayState, frame: usize) -> Icon {
+/// Returns `None` on the (currently unreachable) chance the RGBA buffer is the
+/// wrong length — render_tray then skips the frame rather than aborting the
+/// process from a timer callback (release builds use panic="abort").
+fn state_icon(state: TrayState, frame: usize) -> Option<Icon> {
     let rgba = match state {
         TrayState::Idle => icons::idle(),
         TrayState::Recording => icons::recording(frame),
         TrayState::Processing => icons::processing(frame),
     };
-    Icon::from_rgba(rgba, icons::SIZE, icons::SIZE).expect("valid RGBA icon")
+    Icon::from_rgba(rgba, icons::SIZE, icons::SIZE)
+        .map_err(|e| eprintln!("[holler] tray icon build failed: {e}"))
+        .ok()
 }
 
 /// Open a file/folder in the OS default handler (Finder/Explorer/xdg-open).
