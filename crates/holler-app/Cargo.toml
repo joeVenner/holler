@@ -21,7 +21,7 @@ tray-icon.workspace = true
 global-hotkey.workspace = true
 mimalloc.workspace = true
 arboard = "3.6.1"
-holler-inject = { version = "0.0.0", path = "../holler-inject" }
-holler-store = { version = "0.0.0", path = "../holler-store" }
-holler-config = { version = "0.0.0", path = "../holler-config" }
+holler-inject = { path = "../holler-inject" }
+holler-store = { path = "../holler-store" }
+holler-config = { path = "../holler-config" }
 softbuffer = "0.4.8"
