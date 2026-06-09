@@ -465,7 +465,15 @@ impl App {
             }
         } else {
             if mode == InjectMode::Paste {
-                std::thread::sleep(Duration::from_millis(60));
+                // Let the clipboard propagate to the target app before firing
+                // the paste chord. Windows delivers its clipboard-update
+                // notification to the target later than macOS, so it needs more
+                // headroom or the paste can land stale/empty.
+                #[cfg(target_os = "windows")]
+                const SETTLE_MS: u64 = 100;
+                #[cfg(not(target_os = "windows"))]
+                const SETTLE_MS: u64 = 60;
+                std::thread::sleep(Duration::from_millis(SETTLE_MS));
             }
             match self.ensure_injector() {
                 Some(injector) => {
