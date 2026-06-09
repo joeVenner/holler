@@ -599,9 +599,11 @@ impl ApplicationHandler<UserEvent> for App {
         if self.tray_state != TrayState::Idle {
             // Animating — wake every frame.
             event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + FRAME_INTERVAL));
-        } else if !self.accessibility_ok {
-            // Waiting for the user to grant Accessibility — wake periodically
-            // so the tray label updates the moment permission is granted.
+        } else if cfg!(target_os = "macos") && self.hotkeys.is_some() {
+            // macOS only: poll slowly while idle so the tray reflects an
+            // Accessibility grant OR revoke without a restart (previously only
+            // a grant was detected). Other OSes have no such permission, so
+            // they stay on a true no-poll idle below.
             event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + AX_POLL_INTERVAL));
         } else {
             // Fully idle — sleep until an event arrives (no CPU burn).
