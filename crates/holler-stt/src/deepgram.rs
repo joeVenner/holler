@@ -81,10 +81,13 @@ impl SttProvider for DeepgramStt {
         //   smart_format → punctuation, caps, numbers/dates/currency/URLs
         //   dictation    → spoken "period"/"comma"/"new line" become real marks
         //   punctuate    → explicit; also required by dictation
+        //   language=multi → nova-3 multilingual/code-switching, the closest
+        //                    analog to OpenAI's auto-detect (nova-3 defaults to
+        //                    English-only if language is omitted entirely).
         // "um"/"uh" are stripped by default (filler_words defaults to false).
         // (Values are fixed/URL-safe, so building the query inline is fine.)
         let url = format!(
-            "{}?model={}&smart_format=true&dictation=true&punctuate=true&language=en",
+            "{}?model={}&smart_format=true&dictation=true&punctuate=true&language=multi",
             Self::ENDPOINT,
             self.model
         );
