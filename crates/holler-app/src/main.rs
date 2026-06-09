@@ -340,10 +340,22 @@ impl App {
                     match self.capture.take() {
                         Some(capture) => match capture.stop() {
                             Ok(rec) => {
-                                self.set_tray_state(TrayState::Processing);
                                 if let Some(ov) = &self.overlay { ov.hide(); }
                                 let rec = self.maybe_vad_trim(rec);
-                                self.transcribe(rec);
+                                // Ignore accidental taps / silence: a clip too
+                                // short to hold speech would only waste an API
+                                // request and surface a confusing API error.
+                                const MIN_SAMPLES: usize = 3_200; // 0.2 s @ 16 kHz
+                                if rec.samples.len() < MIN_SAMPLES {
+                                    println!(
+                                        "[holler] clip too short ({} samples) — ignored",
+                                        rec.samples.len()
+                                    );
+                                    self.set_tray_state(TrayState::Idle);
+                                } else {
+                                    self.set_tray_state(TrayState::Processing);
+                                    self.transcribe(rec);
+                                }
                             }
                             Err(e) => {
                                 eprintln!("[holler] capture failed: {e}");
@@ -411,6 +423,15 @@ impl App {
     /// Deliver a transcript on the main thread: copy to clipboard ("copy
     /// memory"), record to history, then inject at the cursor.
     fn deliver(&mut self, t: Transcription) {
+        // Empty/whitespace transcript (silence, no speech detected): don't
+        // clobber the user's clipboard, write an empty history row, or inject
+        // nothing — just go back to Idle.
+        if t.text.trim().is_empty() {
+            println!("[holler] empty transcript — ignored");
+            self.set_tray_state(TrayState::Idle);
+            return;
+        }
+
         println!("[holler] transcript: {}", t.text);
         self.reset_tray_tooltip(); // a successful transcript clears any error hint
 
