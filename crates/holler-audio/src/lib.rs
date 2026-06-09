@@ -289,12 +289,15 @@ pub fn vad_trim(samples: &[f32]) -> Vec<f32> {
     let frames: Vec<bool> = samples
         .chunks(VAD_FRAME)
         .map(|chunk| {
-            if chunk.len() < VAD_FRAME {
-                return false;
-            }
+            // Zero-pad the final sub-frame chunk up to VAD_FRAME so a trailing
+            // word (clips rarely end on an exact 30 ms boundary) still gets
+            // classified instead of being silently dropped. `end` below clamps
+            // to samples.len(), so the real tail is what's retained.
             let i16_frame: Vec<i16> = chunk
                 .iter()
                 .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+                .chain(std::iter::repeat(0))
+                .take(VAD_FRAME)
                 .collect();
             vad.is_voice_segment(&i16_frame).unwrap_or(false)
         })
@@ -394,6 +397,26 @@ mod tests {
             out.len() < padded.len(),
             "expected trim to shorten the buffer (padded={}, out={})",
             padded.len(),
+            out.len()
+        );
+    }
+
+    #[test]
+    fn vad_trim_keeps_trailing_partial_speech_frame() {
+        // 3 full speech frames + a partial (sub-VAD_FRAME) speech tail, with no
+        // trailing silence. The partial frame must be classified (via zero-pad)
+        // and retained — the regression being that it used to be dropped.
+        let speech = speech_frame();
+        let mut buf = Vec::new();
+        for _ in 0..3 {
+            buf.extend_from_slice(&speech);
+        }
+        buf.extend_from_slice(&speech[..360]); // 0.75 of a frame of speech
+        let out = vad_trim(&buf);
+        assert!(
+            out.len() > 3 * VAD_FRAME,
+            "trailing partial speech frame was dropped: {} → {}",
+            buf.len(),
             out.len()
         );
     }
