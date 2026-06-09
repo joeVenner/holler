@@ -95,6 +95,9 @@ struct App {
     hotkeys: Option<GlobalHotKeyManager>,
     tray: Option<TrayIcon>,
     ptt_hotkey_id: u32,
+    /// Human-readable PTT combo (e.g. "Ctrl+Alt+Space"), used to rebuild the
+    /// default tray tooltip after a transient error message.
+    ptt_label: String,
     quit_item_id: Option<MenuId>,
     config_item_id: Option<MenuId>,
     history_item_id: Option<MenuId>,
@@ -156,6 +159,7 @@ impl App {
             hotkeys: None,
             tray: None,
             ptt_hotkey_id: 0,
+            ptt_label: String::new(),
             quit_item_id: None,
             config_item_id: None,
             history_item_id: None,
@@ -228,6 +232,7 @@ impl App {
 
         // Parse the PTT combo from config; falls back to Ctrl+Alt+Space on error.
         let (ptt_hotkey, ptt_label) = holler_config::parse_ptt_key(&self.config.ptt_key);
+        self.ptt_label = ptt_label.clone();
 
         let tray = TrayIconBuilder::new()
             .with_tooltip(format!("Holler — hold {ptt_label} to talk"))
@@ -310,6 +315,7 @@ impl App {
                         Ok(capture) => {
                             self.capture = Some(capture);
                             self.set_tray_state(TrayState::Recording);
+                            self.reset_tray_tooltip(); // clear any prior error hint
                             // Pre-render frame 0 before showing so the window
                             // has content the moment it becomes visible.
                             if let Some(ov) = &mut self.overlay {
@@ -318,7 +324,12 @@ impl App {
                             }
                             println!("[holler] PTT DOWN — recording…");
                         }
-                        Err(e) => eprintln!("[holler] could not start capture: {e}"),
+                        Err(e) => {
+                            eprintln!("[holler] could not start capture: {e}");
+                            self.set_tray_tooltip(
+                                "Holler — microphone unavailable (tray → Grant Microphone Access)",
+                            );
+                        }
                     }
                 }
                 // else: OS key auto-repeat while held — debounced (ignored).
@@ -401,6 +412,7 @@ impl App {
     /// memory"), record to history, then inject at the cursor.
     fn deliver(&mut self, t: Transcription) {
         println!("[holler] transcript: {}", t.text);
+        self.reset_tray_tooltip(); // a successful transcript clears any error hint
 
         // 1. Copy to the system clipboard (also primes the paste injection).
         if let Some(clipboard) = self.ensure_clipboard() {
@@ -413,6 +425,7 @@ impl App {
         if let Some(history) = &self.history {
             if let Err(e) = history.record(&t.text, &t.provider) {
                 eprintln!("[holler] history record failed: {e}");
+                self.set_tray_tooltip("Holler — history not saved (see logs); text still delivered");
             }
         }
 
@@ -463,6 +476,20 @@ impl App {
         if let Some(tray) = &self.tray {
             let _ = tray.set_icon(Some(state_icon(self.tray_state, self.anim_frame)));
         }
+    }
+
+    /// Show a short message on the tray tooltip — the only feedback channel a
+    /// tray agent has (stderr is invisible with no console). Errors are
+    /// non-fatal: a failed tooltip update is ignored.
+    fn set_tray_tooltip(&self, text: &str) {
+        if let Some(tray) = &self.tray {
+            let _ = tray.set_tooltip(Some(text));
+        }
+    }
+
+    /// Restore the default "hold <combo> to talk" tooltip after an error hint.
+    fn reset_tray_tooltip(&self) {
+        self.set_tray_tooltip(&format!("Holler — hold {} to talk", self.ptt_label));
     }
 
     fn ensure_clipboard(&mut self) -> Option<&mut Clipboard> {
@@ -588,6 +615,8 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Transcript(Ok(t)) => self.deliver(t),
             UserEvent::Transcript(Err(e)) => {
                 eprintln!("[holler] transcription failed: {e}");
+                // Surface it where a tray agent can actually see it.
+                self.set_tray_tooltip(&format!("Holler — {e}"));
                 self.set_tray_state(TrayState::Idle);
             }
         }
