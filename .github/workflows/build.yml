@@ -49,6 +49,7 @@ jobs:
         env:
           BINARY_PATH: target/${{ matrix.target }}/release/holler
         run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then export VERSION="${GITHUB_REF_NAME#v}"; fi
           bash scripts/bundle-macos.sh
           mv Holler.app Holler-${{ matrix.target }}.app
 
@@ -104,7 +105,9 @@ jobs:
       - name: Bundle universal .app
         env:
           BINARY_PATH: target/universal-apple-darwin/release/holler
-        run: bash scripts/bundle-macos.sh
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then export VERSION="${GITHUB_REF_NAME#v}"; fi
+          bash scripts/bundle-macos.sh
 
       - name: Create universal DMG
         run: |
@@ -149,8 +152,10 @@ jobs:
       - name: Package ZIP
         shell: pwsh
         run: |
+          $v = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.Substring(1) } else { '0.1.0' }
           pwsh scripts\bundle-windows.ps1 `
-            -BinaryPath target\x86_64-pc-windows-msvc\release\holler.exe
+            -BinaryPath target\x86_64-pc-windows-msvc\release\holler.exe `
+            -Version $v
 
       - name: Upload Windows ZIP
         uses: actions/upload-artifact@v4

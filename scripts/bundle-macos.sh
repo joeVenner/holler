@@ -24,7 +24,9 @@ cd "$(dirname "$0")/.."
 
 APP_NAME="Holler"
 BUNDLE_ID="com.holler.holler"
-VERSION="0.1.0"
+# Honor a VERSION from the environment (CI derives it from the git tag);
+# fall back to a sane default for local builds. `set -u` requires the `:-`.
+VERSION="${VERSION:-0.1.0}"
 APP_DIR="${APP_NAME}.app"
 
 # Allow CI to pass a pre-built binary via BINARY_PATH env var.
