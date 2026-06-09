@@ -172,6 +172,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout (for license files)
+        uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -183,4 +186,6 @@ jobs:
           files: |
             Holler-macOS-universal.dmg
             Holler-Windows-x64-v*.zip
+            LICENSE-MIT
+            LICENSE-APACHE
           generate_release_notes: true
