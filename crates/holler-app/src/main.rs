@@ -168,9 +168,11 @@ impl App {
     }
 
     /// Build everything that must live on the main thread once the loop runs.
-    /// Idempotent: `resumed` can fire more than once on some platforms.
+    /// Idempotent: `resumed` can fire more than once on some platforms. Guarded
+    /// on the tray (not the hotkey) so a failed PTT registration still can't
+    /// rebuild the tray on re-entry.
     fn init(&mut self, event_loop: &ActiveEventLoop) {
-        if self.hotkeys.is_some() {
+        if self.tray.is_some() {
             return;
         }
 
@@ -235,9 +237,27 @@ impl App {
         }));
 
         // --- Global hotkey (PTT) ---
-        let manager = GlobalHotKeyManager::new().expect("create global-hotkey manager");
+        // Registration can fail at runtime — most commonly on Windows when the
+        // combo is already owned by another app/IME, but the manager itself can
+        // fail too. Under panic="abort" an .expect() here hard-kills the whole
+        // tray app at launch with no visible message. Degrade gracefully:
+        // leave hotkeys = None, keep the tray/menu alive, and tell the user how
+        // to recover (change ptt_key via the tray's Edit Settings, then relaunch).
+        let manager = match GlobalHotKeyManager::new() {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("[holler] could not initialise global hotkeys ({e}); push-to-talk disabled.");
+                return;
+            }
+        };
         self.ptt_hotkey_id = ptt_hotkey.id();
-        manager.register(ptt_hotkey).expect("register PTT hotkey");
+        if let Err(e) = manager.register(ptt_hotkey) {
+            eprintln!(
+                "[holler] could not register PTT key {ptt_label} — it may already be in use by \
+                 another app. Change ptt_key in config.toml and relaunch ({e})."
+            );
+            return;
+        }
         self.hotkeys = Some(manager);
 
         // `global-hotkey` has no callback API — only a static channel. Drain it
