@@ -142,8 +142,10 @@ mod tests {
 
     #[test]
     fn model_override_trims_and_empties() {
-        let mut c = Config::default();
-        c.stt_model = "  nova-3  ".to_string();
+        let mut c = Config {
+            stt_model: "  nova-3  ".to_string(),
+            ..Default::default()
+        };
         assert_eq!(c.model_override(), Some("nova-3"));
         c.stt_model = "   ".to_string();
         assert_eq!(c.model_override(), None);
