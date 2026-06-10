@@ -268,6 +268,18 @@ impl SettingsWindow {
         self.ui.hotkey_feedback(res);
         self.request_redraw();
     }
+
+    /// Report the outcome of a `SaveProviders` action back to the panel.
+    pub fn provider_feedback(&mut self, res: Result<(), String>) {
+        self.ui.provider_feedback(res);
+        self.request_redraw();
+    }
+
+    /// Report the outcome of a `SetKey`/`ClearKey` action back to the panel.
+    pub fn key_feedback(&mut self, provider: &str, res: Result<(), String>) {
+        self.ui.key_feedback(provider, res);
+        self.request_redraw();
+    }
 }
 
 impl Drop for SettingsWindow {
