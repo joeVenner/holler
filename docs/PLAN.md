@@ -32,7 +32,7 @@
 ```
 
 ### The one hard integration risk
-macOS: `global-hotkey` + `tray-icon` both require the main-thread event loop; `egui` via `eframe` wants its own. Solution: **single main-thread `winit` loop owns tray + hotkey**; render settings with **manual `egui-winit` + `egui-wgpu`** inside that loop — never `eframe::run_native`. Phase 0 proves the loop before anything else. (See research/02.)
+macOS: `global-hotkey` + `tray-icon` both require the main-thread event loop; `egui` via `eframe` wants its own. Solution: **single main-thread `winit` loop owns tray + hotkey**; render settings with **manual `egui-winit` + `egui_glow`** inside that loop — never `eframe::run_native`. Phase 0 proves the loop before anything else. (See research/02. Renderer re-decided 2026-06-10: `egui_glow`+`glutin` over `egui-wgpu` — leaner deps/RSS, eframe's own default; see DISCOVERIES.)
 
 ## 2. Crate stack (verified current — research/02, /03, /04)
 
@@ -103,7 +103,7 @@ Tray icon reflects state (idle/recording/processing). Debounce auto-repeat `Pres
 ### Phase 2 — LLM cleanup + egui settings
 > Cloud STT moved to Phase 1 (see above). This phase is now LLM post-processing + the GUI.
 - `LlmProvider`: Claude, OpenAI, OpenAICompatible(local Ollama). "Modes": raw / cleaned / formatted prompts.
-- egui settings window via manual `egui-winit`+`egui-wgpu` integration; history search UI; the STT provider/model **menu** + key management (keyring) surfaced here (config-field only until then).
+- egui settings window via manual `egui-winit`+`egui_glow` integration (✅ spike landed 2026-06-10 — tray "Settings…" opens/closes an on-demand window); history search UI; the STT provider/model **menu** + key management (secrets.toml) surfaced here (config-field only until then).
 
 ### Phase 3 — TTS read-back + distribution hardening
 - `TtsProvider`: OpenAI / Deepgram Aura. Separate hotkey reads current selection/clipboard aloud.

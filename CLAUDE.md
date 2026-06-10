@@ -24,7 +24,7 @@ Originally planned as "Talker"; renamed to **Holler** before the first code. Pro
 - ✅ **Tray UX:** state-aware **animated** tray (idle blue dot / recording pulsing red / processing spinner; `ControlFlow::WaitUntil` only while active, full sleep when idle). Menu has "Edit Settings (config.toml)" + "Open History Folder" as a stopgap settings entry.
 - ✅ **Deepgram dictation mode:** query now `smart_format=true&dictation=true&punctuate=true` — spoken punctuation/newlines + formatting, server-side.
 
-Next action: **Phase 1.5** — Silero VAD (trim silence → cheaper Deepgram calls). Then **Phase 2** — **egui settings window** (the hard 2nd integration risk: manual `egui-winit`+`egui-wgpu` in the same loop — provider/model menu, **remappable PTT key**, history search, key management) + optional LLM cleanup toggle + Developer ID signing.
+Next action: **Phase 2 GUI build-out** (docs/LOOP_PROGRESS.md backlog P1–P9). The hard 2nd integration risk is **cleared**: the egui settings window spike landed 2026-06-10 (`feature/gui-egui-spike`) — manual `egui-winit`+**`egui_glow`** (re-decided over egui-wgpu, see DISCOVERIES) in the same single winit loop, window on demand from the tray's "Settings…" item, dropped on close. Remaining: settings panels (provider/model menu, remappable PTT key, keys, permissions, history, stats), overlay redesign, branding. Phase 1.5 (webrtc-vad trim) is done.
 
 Before writing code, read in order:
 1. `docs/DECISIONS.md` — every locked decision + open questions. **Do not re-litigate these.**
