@@ -72,6 +72,9 @@ jobs:
     name: macOS Universal (fat binary)
     needs: build-macos
     runs-on: macos-15
+    # The signing secrets live in the "ENV" environment, so this job must opt
+    # into it to read them.
+    environment: ENV
     # Surface signing secrets as env so steps can gate on them (the `secrets`
     # context is not allowed in `if:`). Empty when unconfigured → ad-hoc path.
     env:
