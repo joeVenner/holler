@@ -280,6 +280,14 @@ impl SettingsWindow {
         self.ui.key_feedback(provider, res);
         self.request_redraw();
     }
+
+    /// Re-read live OS permission status into the Permissions panel and repaint.
+    /// Driven by the main loop's permission poll so a grant/revoke in System
+    /// Settings shows up here without a restart.
+    pub fn refresh_permissions(&mut self) {
+        self.ui.refresh_permissions();
+        self.request_redraw();
+    }
 }
 
 impl Drop for SettingsWindow {

@@ -137,7 +137,11 @@ struct App {
     /// Retained menu items so we can update their text/enabled state at runtime.
     ax_menu_item: Option<MenuItem>,
     grant_access_menu_item: Option<MenuItem>,
-    /// Timestamp of the last AXIsProcessTrusted() check (rate-limits polling).
+    mic_menu_item: Option<MenuItem>,
+    /// Last microphone status seen by the poll — drives live tray/panel updates.
+    last_mic_status: permissions::MicStatus,
+    /// Timestamp of the last permission poll (rate-limits AXIsProcessTrusted /
+    /// microphone-status checks).
     last_ax_check: Instant,
     /// Desktop recording indicator shown during PTT hold.
     overlay: Option<Overlay>,
@@ -180,6 +184,8 @@ impl App {
             grant_mic_item_id: None,
             ax_menu_item: None,
             grant_access_menu_item: None,
+            mic_menu_item: None,
+            last_mic_status: permissions::microphone_status(),
             last_ax_check: Instant::now(),
             tray_state: TrayState::Idle,
             anim_frame: 0,
@@ -211,8 +217,7 @@ impl App {
         let menu = Menu::new();
 
         // Permissions section.
-        let mic_label = "✓  Microphone";
-        let mic_item = MenuItem::new(mic_label, false, None); // always shown; disabled label
+        let mic_item = MenuItem::new(self.last_mic_status.tray_label(), false, None); // disabled status label
         let ax_label = if self.accessibility_ok {
             "✓  Accessibility (auto-paste active)".to_string()
         } else {
@@ -227,9 +232,10 @@ impl App {
         menu.append(&grant_mic_item).expect("append grant-mic item");
         self.grant_access_item_id = Some(grant_access_item.id().clone());
         self.grant_mic_item_id = Some(grant_mic_item.id().clone());
-        // Retain items so refresh_ax_status() can update their labels live.
+        // Retain items so refresh_permissions() can update their labels live.
         self.ax_menu_item = Some(ax_item);
         self.grant_access_menu_item = Some(grant_access_item);
+        self.mic_menu_item = Some(mic_item);
 
         menu.append(&PredefinedMenuItem::separator()).expect("separator");
 
@@ -573,30 +579,50 @@ impl App {
         self.injector.as_mut()
     }
 
-    /// Re-query AXIsProcessTrusted() and update the tray menu labels in-place
-    /// so the user sees the real status without restarting the app.
-    fn refresh_ax_status(&mut self) {
+    /// Re-query the live OS permission status (Accessibility + microphone) and,
+    /// when something changed, update the tray labels in-place and refresh the
+    /// open settings panel — so the user sees reality without a restart.
+    fn refresh_permissions(&mut self) {
         self.last_ax_check = Instant::now();
+        let mut changed = false;
+
         let granted = permissions::accessibility_granted();
-        if granted == self.accessibility_ok {
-            return;
+        if granted != self.accessibility_ok {
+            changed = true;
+            self.accessibility_ok = granted;
+            self.accessibility_warned = false; // allow fresh log on next delivery
+            if let Some(item) = &self.ax_menu_item {
+                item.set_text(if granted {
+                    "✓  Accessibility (auto-paste active)"
+                } else {
+                    "✗  Accessibility (auto-paste disabled)"
+                });
+            }
+            if let Some(item) = &self.grant_access_menu_item {
+                item.set_enabled(!granted);
+            }
+            println!(
+                "[holler] Accessibility {}",
+                if granted { "granted — auto-paste active" } else { "revoked — clipboard fallback active" }
+            );
         }
-        self.accessibility_ok = granted;
-        self.accessibility_warned = false; // allow fresh log on next delivery
-        if let Some(item) = &self.ax_menu_item {
-            if granted {
-                item.set_text("✓  Accessibility (auto-paste active)");
-            } else {
-                item.set_text("✗  Accessibility (auto-paste disabled)");
+
+        let mic = permissions::microphone_status();
+        if mic != self.last_mic_status {
+            changed = true;
+            self.last_mic_status = mic;
+            if let Some(item) = &self.mic_menu_item {
+                item.set_text(mic.tray_label());
+            }
+            println!("[holler] Microphone status: {mic:?}");
+        }
+
+        // Push the fresh status into the panel if it's open and showing it.
+        if changed {
+            if let Some(sw) = &mut self.settings {
+                sw.refresh_permissions();
             }
         }
-        if let Some(item) = &self.grant_access_menu_item {
-            item.set_enabled(!granted);
-        }
-        println!(
-            "[holler] Accessibility {}",
-            if granted { "granted — auto-paste active" } else { "revoked — clipboard fallback active" }
-        );
     }
 
     /// Apply the edits the settings UI confirmed this frame, then report each
@@ -661,6 +687,14 @@ impl App {
                     if let Some(sw) = &mut self.settings {
                         sw.key_feedback(&provider, res);
                     }
+                }
+                SettingsAction::OpenAccessibilitySettings => {
+                    permissions::open_accessibility_settings();
+                    println!("[holler] opened Accessibility settings — the panel updates automatically once granted.");
+                }
+                SettingsAction::OpenMicrophoneSettings => {
+                    permissions::open_mic_settings();
+                    println!("[holler] opened Microphone settings — the panel updates automatically once changed.");
                 }
             }
         }
@@ -730,12 +764,12 @@ impl ApplicationHandler<UserEvent> for App {
                 sw.request_redraw();
             }
         }
-        // Re-check Accessibility on every loop wake, rate-limited. Guarded by
+        // Re-check permissions on every loop wake, rate-limited. Guarded by
         // hotkeys.is_some() so we don't poll before init() has run.
         if self.hotkeys.is_some()
             && Instant::now().duration_since(self.last_ax_check) >= AX_POLL_INTERVAL
         {
-            self.refresh_ax_status();
+            self.refresh_permissions();
         }
     }
 
@@ -752,10 +786,10 @@ impl ApplicationHandler<UserEvent> for App {
             wake = Some(wake.map_or(at, |w| w.min(at)));
         }
         if cfg!(target_os = "macos") && self.hotkeys.is_some() {
-            // macOS only: poll slowly so the tray reflects an Accessibility
-            // grant OR revoke without a restart. Other OSes have no such
-            // permission, so with nothing else pending they reach the true
-            // no-poll idle below.
+            // macOS only: poll slowly so the tray (and open Permissions panel)
+            // reflect an Accessibility or microphone grant/revoke without a
+            // restart. Other OSes have no such per-app prompt, so with nothing
+            // else pending they reach the true no-poll idle below.
             let ax = now + AX_POLL_INTERVAL;
             wake = Some(wake.map_or(ax, |w| w.min(ax)));
         }
