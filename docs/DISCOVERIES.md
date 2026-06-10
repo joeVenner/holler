@@ -21,6 +21,7 @@ Append hard-learned technical lessons and edge cases here, newest first, using t
   - **Paint the first frame before `set_visible(true)`.** Don't wait for a `RedrawRequested` on a hidden window (not all platforms deliver one); `SettingsWindow::create` paints synchronously, then shows + focuses. Avoids the white flash (egui#2279).
   - **LSUIElement agents can still take key focus:** winit's `Window::focus_window()` on macOS calls `activateIgnoringOtherApps(true)` + `makeKeyAndOrderFront`, which is exactly what an Accessory-policy app needs to bring the settings window to the front. No activation-policy juggling required (winit 0.30 has no runtime policy setter anyway).
   - `glutin-winit`'s `DisplayBuilder` works fine against a *running* loop's `ActiveEventLoop` — on-demand GL window creation from a tray-menu click is unproblematic. Use `ApiPreference::FallbackEgl` (native WGL/CGL first; egui#2520).
+  - egui 0.34 deprecated `SidePanel`/`TopBottomPanel` (and `exact_width`) in favour of the unified `egui::Panel::left(..).exact_size(..)` builder — `-D warnings` turns the deprecation into a hard error.
 - **Impact:** `holler-app` (new `settings.rs`; `main.rs` menu + event routing + merged wake deadlines), `Cargo.toml`/lock.
 - **Reference:** commit `f2765d4`, branch `feature/gui-egui-spike`; `crates/holler-app/src/settings.rs`.
 
