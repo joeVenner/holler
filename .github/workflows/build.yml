@@ -72,6 +72,15 @@ jobs:
     name: macOS Universal (fat binary)
     needs: build-macos
     runs-on: macos-15
+    # Surface signing secrets as env so steps can gate on them (the `secrets`
+    # context is not allowed in `if:`). Empty when unconfigured → ad-hoc path.
+    env:
+      MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
@@ -105,10 +114,7 @@ jobs:
       # Import the Developer ID cert into a throwaway keychain so codesign can
       # find it. Skipped (→ ad-hoc signing) until the secret is configured.
       - name: Import signing certificate
-        if: ${{ secrets.MACOS_CERT_P12_BASE64 != '' }}
-        env:
-          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
-          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        if: env.MACOS_CERT_P12_BASE64 != ''
         run: |
           KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
           KEYCHAIN_PW="$(openssl rand -base64 24)"
@@ -124,7 +130,7 @@ jobs:
         env:
           BINARY_PATH: target/universal-apple-darwin/release/holler
           # Empty when unconfigured → bundle-macos.sh falls back to ad-hoc.
-          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          SIGN_IDENTITY: ${{ env.MACOS_SIGN_IDENTITY }}
         run: |
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then export VERSION="${GITHUB_REF_NAME#v}"; fi
           bash scripts/bundle-macos.sh
@@ -139,11 +145,7 @@ jobs:
       # Notarize the DMG with Apple and staple the ticket so it installs without
       # a Gatekeeper warning, even offline. Skipped until secrets are configured.
       - name: Notarize & staple
-        if: ${{ secrets.APPLE_ID != '' }}
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        if: env.APPLE_ID != ''
         run: |
           xcrun notarytool submit Holler-macOS-universal.dmg \
             --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
