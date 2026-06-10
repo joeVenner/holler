@@ -10,6 +10,12 @@ use std::collections::BTreeMap;
 
 use holler_config::{Config, SecretStatus};
 
+use crate::permissions::{self, MicStatus};
+
+/// Green/red status colours, shared by every panel's outcome line.
+const OK_GREEN: egui::Color32 = egui::Color32::from_rgb(110, 200, 110);
+const ERR_RED: egui::Color32 = egui::Color32::from_rgb(230, 110, 100);
+
 /// One user-confirmed edit, applied by `App` after the frame.
 pub enum SettingsAction {
     /// Persist the General panel fields (merged into the app config).
@@ -25,6 +31,10 @@ pub enum SettingsAction {
     SetKey { provider: String, key: String },
     /// Remove a provider's API key from secrets.toml.
     ClearKey { provider: String },
+    /// Open the OS Accessibility privacy pane (macOS Grant button).
+    OpenAccessibilitySettings,
+    /// Open the OS Microphone privacy pane.
+    OpenMicrophoneSettings,
 }
 
 /// Everything the Providers panel needs to render one provider row. Adding a
@@ -155,6 +165,10 @@ pub(super) struct UiState {
     provider_status: Option<(bool, String)>,
     key_drafts: BTreeMap<&'static str, String>,
     key_status: BTreeMap<&'static str, SecretStatus>,
+    // Permissions: live OS status, refreshed by the main loop's poll (so the
+    // panel reflects a grant/revoke done in System Settings without a restart).
+    ax_granted: bool,
+    mic_status: MicStatus,
     /// Edits confirmed this frame, drained by `SettingsWindow::redraw`.
     pub(super) actions: Vec<SettingsAction>,
 }
@@ -187,8 +201,18 @@ impl UiState {
             provider_status: None,
             key_drafts: BTreeMap::new(),
             key_status,
+            ax_granted: permissions::accessibility_granted(),
+            mic_status: permissions::microphone_status(),
             actions: Vec::new(),
         }
+    }
+
+    /// Re-query the live OS permission status. Called by the main loop's poll
+    /// (via `SettingsWindow::refresh_permissions`) whenever it detects a change,
+    /// so the open panel tracks grants/revokes made in System Settings.
+    pub(super) fn refresh_permissions(&mut self) {
+        self.ax_granted = permissions::accessibility_granted();
+        self.mic_status = permissions::microphone_status();
     }
 
     /// Outcome of a `SaveGeneral` action.
@@ -260,6 +284,7 @@ impl UiState {
             Panel::General => self.draw_general(ui),
             Panel::Hotkey => self.draw_hotkey(ui),
             Panel::Providers => self.draw_providers(ui),
+            Panel::Permissions => self.draw_permissions(ui),
             Panel::About => draw_about(ui),
             panel => draw_placeholder(ui, panel),
         });
@@ -397,13 +422,10 @@ impl UiState {
             ui.weak(meta.kind);
             match self.key_status.get(meta.id) {
                 Some(SecretStatus::FromFile) => {
-                    ui.colored_label(egui::Color32::from_rgb(110, 200, 110), "key configured ✓");
+                    ui.colored_label(OK_GREEN, "key configured ✓");
                 }
                 Some(SecretStatus::FromEnv) => {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(110, 200, 110),
-                        "key configured ✓ (env var)",
-                    );
+                    ui.colored_label(OK_GREEN, "key configured ✓ (env var)");
                 }
                 _ => {
                     ui.weak("no key ✗");
@@ -461,6 +483,79 @@ impl UiState {
             }
         });
     }
+
+    fn draw_permissions(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Permissions");
+        ui.add_space(4.0);
+        ui.label("Holler needs to hear you and to type the transcript at your cursor.");
+        ui.add_space(14.0);
+
+        // --- Microphone: required to capture any audio at all. ---
+        ui.strong("Microphone");
+        ui.add_space(2.0);
+        if cfg!(target_os = "macos") {
+            match self.mic_status {
+                MicStatus::Granted => perm_line(ui, true, "Granted — Holler can hear you."),
+                MicStatus::NotDetermined => {
+                    ui.label("Not requested yet — macOS will ask the first time you record.");
+                }
+                MicStatus::Denied => {
+                    perm_line(ui, false, "Denied — recordings will be silent.");
+                    if ui.button("Open Microphone Settings…").clicked() {
+                        self.actions.push(SettingsAction::OpenMicrophoneSettings);
+                    }
+                }
+                MicStatus::Restricted => {
+                    perm_line(ui, false, "Blocked by your organization — ask your administrator.");
+                }
+            }
+        } else {
+            ui.label("Managed by Windows (Settings → Privacy → Microphone).");
+            if ui.button("Open Microphone Settings…").clicked() {
+                self.actions.push(SettingsAction::OpenMicrophoneSettings);
+            }
+        }
+        ui.add_space(16.0);
+
+        // --- Accessibility / input injection: needed for auto-paste/type. ---
+        if cfg!(target_os = "macos") {
+            ui.strong("Accessibility");
+            ui.add_space(2.0);
+            if self.ax_granted {
+                perm_line(ui, true, "Granted — auto-paste is active.");
+            } else {
+                perm_line(
+                    ui,
+                    false,
+                    "Not granted — transcripts land on the clipboard for you to paste.",
+                );
+                if ui.button("Grant Accessibility Access…").clicked() {
+                    self.actions
+                        .push(SettingsAction::OpenAccessibilitySettings);
+                }
+            }
+        } else {
+            ui.strong("Input injection");
+            ui.add_space(2.0);
+            ui.label("No permission required on Windows.");
+            ui.weak("Auto-paste can only fail against apps run as Administrator (UIPI); \
+                     run Holler elevated too if you need to type into them.");
+        }
+
+        ui.add_space(16.0);
+        ui.separator();
+        ui.add_space(6.0);
+        if cfg!(target_os = "macos") {
+            ui.weak("Status refreshes automatically — grant access in System Settings and \
+                     this updates within a couple of seconds, no restart needed.");
+        }
+    }
+}
+
+/// A green/red permission status line (no leading space — the caller controls
+/// spacing, unlike [`draw_status`] which sits under a panel's controls).
+fn perm_line(ui: &mut egui::Ui, ok: bool, msg: &str) {
+    ui.colored_label(if ok { OK_GREEN } else { ERR_RED }, msg);
 }
 
 /// What the capture widget saw this frame.
@@ -526,12 +621,7 @@ fn combo_string(key: egui::Key, m: egui::Modifiers) -> String {
 fn draw_status(ui: &mut egui::Ui, status: &Option<(bool, String)>) {
     if let Some((ok, msg)) = status {
         ui.add_space(8.0);
-        let color = if *ok {
-            egui::Color32::from_rgb(110, 200, 110)
-        } else {
-            egui::Color32::from_rgb(230, 110, 100)
-        };
-        ui.colored_label(color, msg);
+        ui.colored_label(if *ok { OK_GREEN } else { ERR_RED }, msg);
     }
 }
 

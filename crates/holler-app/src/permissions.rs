@@ -17,6 +17,72 @@ pub fn accessibility_granted() -> bool {
     }
 }
 
+/// Microphone privacy authorization. macOS gates microphone access per app
+/// (System Settings → Privacy & Security → Microphone). Other platforms have
+/// no equivalent per-app prompt, so the status there is always [`Granted`].
+///
+/// [`Granted`]: MicStatus::Granted
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MicStatus {
+    /// The app may capture audio.
+    Granted,
+    /// The user has denied access; recordings stay silent until re-enabled.
+    Denied,
+    /// Not asked yet — the first recording shows the OS prompt (capture works).
+    NotDetermined,
+    /// Blocked by MDM / parental controls; the user cannot change it.
+    Restricted,
+}
+
+impl MicStatus {
+    /// The tray menu label for the current status — kept here so the tray and
+    /// the settings panel agree on how each state reads.
+    pub fn tray_label(self) -> &'static str {
+        match self {
+            MicStatus::Granted => "✓  Microphone",
+            MicStatus::NotDetermined => "•  Microphone (asks on first use)",
+            MicStatus::Denied => "✗  Microphone (denied)",
+            MicStatus::Restricted => "✗  Microphone (blocked)",
+        }
+    }
+}
+
+/// Current microphone authorization. This is a pure query — only an actual
+/// capture (or `requestAccessForMediaType:`) ever shows a prompt — so it is
+/// safe to call on a poll while the settings window is open.
+pub fn microphone_status() -> MicStatus {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::msg_send;
+        use objc2::runtime::AnyClass;
+        use objc2_foundation::NSString;
+
+        // [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio].
+        // AVMediaTypeAudio is the constant NSString @"soun".
+        let Some(cls) = AnyClass::get(c"AVCaptureDevice") else {
+            // AVFoundation somehow not loaded — assume usable rather than
+            // wrongly reporting a permission problem we couldn't read.
+            return MicStatus::Granted;
+        };
+        let media_type = NSString::from_str("soun");
+        // SAFETY: documented class method `(AVMediaType) -> AVAuthorizationStatus`
+        // (an NSInteger). The NSString argument outlives the synchronous call.
+        let raw: isize = unsafe { msg_send![cls, authorizationStatusForMediaType: &*media_type] };
+        match raw {
+            3 => MicStatus::Granted,
+            2 => MicStatus::Denied,
+            1 => MicStatus::Restricted,
+            // 0 = NotDetermined; treat any unexpected value the same (capture
+            // still prompts, so this is the safe default).
+            _ => MicStatus::NotDetermined,
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        MicStatus::Granted
+    }
+}
+
 /// Open the OS panel where the user can grant Accessibility access.
 pub fn open_accessibility_settings() {
     #[cfg(target_os = "macos")]
@@ -52,5 +118,32 @@ pub fn open_mic_settings() {
         let _ = std::process::Command::new("explorer.exe")
             .arg("ms-settings:privacy-microphone")
             .spawn();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Smoke test: the live status queries must return without panicking. On
+    /// macOS this exercises the AVCaptureDevice Objective-C messaging path
+    /// (class lookup + `msg_send`), catching a broken AVFoundation link or a
+    /// wrong selector signature in CI before it ships.
+    #[test]
+    fn status_queries_do_not_panic() {
+        let _ = accessibility_granted();
+        let _ = microphone_status();
+    }
+
+    #[test]
+    fn every_mic_status_has_a_tray_label() {
+        for status in [
+            MicStatus::Granted,
+            MicStatus::Denied,
+            MicStatus::NotDetermined,
+            MicStatus::Restricted,
+        ] {
+            assert!(!status.tray_label().is_empty());
+        }
     }
 }
