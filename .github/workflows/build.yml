@@ -1,11 +1,13 @@
 name: Build & Package
 
 on:
+  # The full pipeline (macOS/Windows builds, signing, notarization, release) is
+  # expensive, so it runs only on version tags — plus a manual button to
+  # validate a branch on demand before tagging, without burning minutes on
+  # every push/PR.
   push:
-    branches: [main, "feature/**"]
     tags: ["v*"]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
