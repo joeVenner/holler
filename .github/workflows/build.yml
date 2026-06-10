@@ -72,6 +72,18 @@ jobs:
     name: macOS Universal (fat binary)
     needs: build-macos
     runs-on: macos-15
+    # The signing secrets live in the "ENV" environment, so this job must opt
+    # into it to read them.
+    environment: ENV
+    # Surface signing secrets as env so steps can gate on them (the `secrets`
+    # context is not allowed in `if:`). Empty when unconfigured → ad-hoc path.
+    env:
+      MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
@@ -102,9 +114,26 @@ jobs:
             target/x86_64-apple-darwin/release/holler \
             -output target/universal-apple-darwin/release/holler
 
+      # Import the Developer ID cert into a throwaway keychain so codesign can
+      # find it. Skipped (→ ad-hoc signing) until the secret is configured.
+      - name: Import signing certificate
+        if: env.MACOS_CERT_P12_BASE64 != ''
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PW="$(openssl rand -base64 24)"
+          security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          echo "$MACOS_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PW" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed s/\"//g)
+
       - name: Bundle universal .app
         env:
           BINARY_PATH: target/universal-apple-darwin/release/holler
+          # Empty when unconfigured → bundle-macos.sh falls back to ad-hoc.
+          SIGN_IDENTITY: ${{ env.MACOS_SIGN_IDENTITY }}
         run: |
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then export VERSION="${GITHUB_REF_NAME#v}"; fi
           bash scripts/bundle-macos.sh
@@ -115,6 +144,16 @@ jobs:
             -srcfolder Holler.app \
             -ov -format UDZO \
             Holler-macOS-universal.dmg
+
+      # Notarize the DMG with Apple and staple the ticket so it installs without
+      # a Gatekeeper warning, even offline. Skipped until secrets are configured.
+      - name: Notarize & staple
+        if: env.APPLE_ID != ''
+        run: |
+          xcrun notarytool submit Holler-macOS-universal.dmg \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple Holler-macOS-universal.dmg
 
       - name: Upload universal DMG
         uses: actions/upload-artifact@v4

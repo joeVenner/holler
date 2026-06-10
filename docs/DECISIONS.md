@@ -18,7 +18,7 @@ Captured during the planning session on **2026-06-08** with Yassir. These are **
 | Copy memory | Clipboard set **and** searchable SQLite history | Yassir chose "Both". |
 | AI providers | Provider-agnostic/BYOK behind traits — Claude, OpenAI, Deepgram, local OpenAI-compatible (Ollama) | Flexibility. **Key storage REVISED 2026-06-10:** moved from the OS keychain (`keyring`) to a `0600` `secrets.toml` in the config dir (separate from `config.toml`). Ad-hoc-signed macOS bundles change identity each rebuild, so the keychain TCC grant never stuck and macOS re-prompted on every run. `HOLLER_<PROVIDER>_KEY` env var overrides the file. |
 | TTS | Deferred to phase 3 | De-risk v1; design traits now, build later. |
-| Distribution | Public eventually → plan signing/notarization + permission onboarding from the start | Stable Developer ID; clean macOS TCC flow. |
+| Distribution | Public eventually → plan signing/notarization + permission onboarding from the start | Stable Developer ID; clean macOS TCC flow. **2026-06-10:** repo now public; Developer ID signing + notarization wired into CI (gated on secrets, ad-hoc fallback) — see `docs/SIGNING.md`. |
 
 ## Recommendations I made on Yassir's behalf (open to challenge)
 - **Defer GUI to phase 2**, ship Phase 1 with a TOML config file. Removes the tray+hotkey+egui main-thread-loop integration risk from the MVP critical path.

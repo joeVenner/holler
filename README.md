@@ -92,9 +92,10 @@ cargo run                # run from the terminal (see logs); injection/keychain
 For logs while using the bundle’s stable identity, run the inner binary:
 `./Holler.app/Contents/MacOS/holler`.
 
-> Note: ad-hoc signing ties permissions to the exact binary, so after
-> rebuilding the bundle you may need to re-approve Accessibility. A Developer ID
-> signature (Phase 3) makes the grant permanent.
+> Note: local/ad-hoc signing ties permissions to the exact binary, so after
+> rebuilding you may need to re-approve Accessibility. Release DMGs are signed
+> with a **Developer ID** and notarized once the signing secrets are configured
+> (see [`docs/SIGNING.md`](docs/SIGNING.md)), which also makes the grant stick.
 
 ### Troubleshooting
 

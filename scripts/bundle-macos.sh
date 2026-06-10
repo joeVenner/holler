@@ -72,9 +72,24 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-echo "==> Ad-hoc code signing"
-codesign --force --sign - --timestamp=none "$APP_DIR/Contents/MacOS/holler"
-codesign --force --sign - --timestamp=none "$APP_DIR"
+# Sign with a real Developer ID when SIGN_IDENTITY is set (CI/release), so the
+# app passes Gatekeeper for everyone and the TCC grant survives rebuilds.
+# Otherwise fall back to ad-hoc for local dev (Gatekeeper will warn).
+ENTITLEMENTS="$(dirname "$0")/holler.entitlements"
+if [[ -n "${SIGN_IDENTITY:-}" ]]; then
+  echo "==> Developer ID signing + hardened runtime ($SIGN_IDENTITY)"
+  # Entitlements + hardened runtime go on the executable; the bundle wrapper is
+  # then sealed over it. A secure --timestamp is required for notarization.
+  codesign --force --options runtime --timestamp \
+    --entitlements "$ENTITLEMENTS" \
+    --sign "$SIGN_IDENTITY" "$APP_DIR/Contents/MacOS/holler"
+  codesign --force --options runtime --timestamp \
+    --sign "$SIGN_IDENTITY" "$APP_DIR"
+else
+  echo "==> Ad-hoc code signing (no SIGN_IDENTITY — Gatekeeper will warn on other Macs)"
+  codesign --force --sign - --timestamp=none "$APP_DIR/Contents/MacOS/holler"
+  codesign --force --sign - --timestamp=none "$APP_DIR"
+fi
 codesign --verify --verbose "$APP_DIR"
 
 echo
