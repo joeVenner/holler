@@ -62,6 +62,50 @@ pub fn store_secret(account: &str, secret: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// Remove the stored key for `account` from `secrets.toml` (other providers'
+/// keys are preserved). A missing file or missing entry is not an error.
+/// Note: an env-var override (`HOLLER_<ACCOUNT>_KEY`) is NOT touched — that
+/// belongs to the user's shell, not to us.
+pub fn remove_secret(account: &str) -> Result<(), ConfigError> {
+    let mut keys = read_all()?;
+    if keys.remove(account).is_none() {
+        return Ok(()); // nothing stored — done.
+    }
+    let path = secrets_path()?;
+    let text = toml::to_string_pretty(&keys).map_err(|e| ConfigError::Serialize(e.to_string()))?;
+    let header = "# Holler API keys — keep this file private (it is chmod 0600 on\n\
+                  # macOS/Linux) and NEVER commit it. Delete a line to remove a key.\n\n";
+    fs::write(&path, format!("{header}{text}")).map_err(|e| ConfigError::Io(e.to_string()))?;
+    restrict_permissions(&path)?;
+    Ok(())
+}
+
+/// Where a provider's key comes from, WITHOUT exposing the key itself —
+/// the settings UI shows "configured ✓/✗" and never the value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretStatus {
+    /// No key anywhere — the provider is not set up.
+    Missing,
+    /// Key present in `secrets.toml` (clearable from the UI).
+    FromFile,
+    /// Key supplied via `HOLLER_<ACCOUNT>_KEY` (not clearable from the UI;
+    /// it shadows any file entry, matching [`load_secret`]'s order).
+    FromEnv,
+}
+
+/// Probe the key source for `account` (same resolution order as
+/// [`load_secret`]: env var first, then the file).
+pub fn secret_status(account: &str) -> SecretStatus {
+    let env_var = format!("HOLLER_{}_KEY", account.to_ascii_uppercase());
+    if std::env::var(&env_var).map(|v| !v.is_empty()).unwrap_or(false) {
+        return SecretStatus::FromEnv;
+    }
+    match read_all().ok().and_then(|mut t| t.remove(account)) {
+        Some(k) if !k.is_empty() => SecretStatus::FromFile,
+        _ => SecretStatus::Missing,
+    }
+}
+
 /// Read the whole secrets table; an absent file is an empty table.
 fn read_all() -> Result<BTreeMap<String, String>, ConfigError> {
     let path = secrets_path()?;
@@ -87,4 +131,36 @@ fn restrict_permissions(path: &std::path::Path) -> Result<(), ConfigError> {
 #[cfg(not(unix))]
 fn restrict_permissions(_path: &std::path::Path) -> Result<(), ConfigError> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // File-backed paths resolve to the REAL user config dir, so tests stick
+    // to accounts that cannot exist there and to the env-var path.
+
+    #[test]
+    fn missing_account_reports_missing() {
+        assert_eq!(
+            secret_status("holler-test-nonexistent-provider"),
+            SecretStatus::Missing
+        );
+    }
+
+    #[test]
+    fn env_var_reports_from_env() {
+        // Serialised by account name uniqueness; no file I/O involved.
+        std::env::set_var("HOLLER_HOLLER_TEST_ENV_PROV_KEY", "k");
+        assert_eq!(
+            secret_status("holler_test_env_prov"),
+            SecretStatus::FromEnv
+        );
+        std::env::remove_var("HOLLER_HOLLER_TEST_ENV_PROV_KEY");
+    }
+
+    #[test]
+    fn remove_of_absent_account_is_ok() {
+        assert!(remove_secret("holler-test-nonexistent-provider").is_ok());
+    }
 }
