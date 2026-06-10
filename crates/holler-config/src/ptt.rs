@@ -21,6 +21,18 @@ fn default_hotkey() -> HotKey {
 /// `cmd`/`command`/`super`/`meta`, `shift`.
 /// On any parse error, logs a warning and returns the default `Ctrl+Alt+Space`.
 pub fn parse_ptt_key(raw: &str) -> (HotKey, String) {
+    match try_parse_ptt_key(raw) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            eprintln!("[holler] invalid ptt_key {raw:?}: {e}; falling back to {DEFAULT_LABEL}");
+            (default_hotkey(), DEFAULT_LABEL.to_string())
+        }
+    }
+}
+
+/// Strict variant of [`parse_ptt_key`]: returns the parse error instead of
+/// falling back, so interactive callers (the settings UI) can surface it.
+pub fn try_parse_ptt_key(raw: &str) -> Result<(HotKey, String), String> {
     let normalized = raw
         .split('+')
         .map(|tok| match tok.trim().to_uppercase().as_str() {
@@ -31,16 +43,13 @@ pub fn parse_ptt_key(raw: &str) -> (HotKey, String) {
         .collect::<Vec<_>>()
         .join("+");
 
-    match normalized.parse::<HotKey>() {
-        Ok(hk) => {
+    normalized
+        .parse::<HotKey>()
+        .map(|hk| {
             let label = hotkey_label(&hk);
             (hk, label)
-        }
-        Err(e) => {
-            eprintln!("[holler] invalid ptt_key {raw:?}: {e}; falling back to {DEFAULT_LABEL}");
-            (default_hotkey(), DEFAULT_LABEL.to_string())
-        }
-    }
+        })
+        .map_err(|e| e.to_string())
 }
 
 /// Build a human-readable label from a parsed hotkey, e.g. `"Ctrl+Alt+Space"`.
@@ -122,5 +131,21 @@ mod tests {
         let (hk, label) = parse_ptt_key("");
         assert_eq!(hk.key, Code::Space);
         assert_eq!(label, DEFAULT_LABEL);
+    }
+
+    #[test]
+    fn try_parse_rejects_invalid_input() {
+        assert!(try_parse_ptt_key("notakey").is_err());
+        assert!(try_parse_ptt_key("").is_err());
+        assert!(try_parse_ptt_key("ctrl+alt").is_err()); // modifiers only
+    }
+
+    #[test]
+    fn try_parse_accepts_valid_input() {
+        let (hk, label) = try_parse_ptt_key("cmd+shift+h").unwrap();
+        assert!(hk.mods.contains(Modifiers::SUPER));
+        assert!(hk.mods.contains(Modifiers::SHIFT));
+        assert_eq!(hk.key, Code::KeyH);
+        assert_eq!(label, "Shift+Cmd+H");
     }
 }
