@@ -49,7 +49,7 @@ use winit::{
     window::WindowId,
 };
 use overlay::Overlay;
-use settings::SettingsWindow;
+use settings::{SettingsAction, SettingsWindow};
 
 /// How often the tray animation advances a frame.
 const FRAME_INTERVAL: Duration = Duration::from_millis(90);
@@ -99,7 +99,9 @@ struct App {
     // unregisters the hotkey, dropping the tray removes the menu-bar icon.
     hotkeys: Option<GlobalHotKeyManager>,
     tray: Option<TrayIcon>,
-    ptt_hotkey_id: u32,
+    /// Id of the currently registered PTT hotkey; `None` while registration
+    /// has failed (combo taken) — recoverable live via Settings → Hotkey.
+    ptt_hotkey_id: Option<u32>,
     /// Human-readable PTT combo (e.g. "Ctrl+Alt+Space"), used to rebuild the
     /// default tray tooltip after a transient error message.
     ptt_label: String,
@@ -169,7 +171,7 @@ impl App {
             proxy,
             hotkeys: None,
             tray: None,
-            ptt_hotkey_id: 0,
+            ptt_hotkey_id: None,
             ptt_label: String::new(),
             quit_item_id: None,
             config_item_id: None,
@@ -273,42 +275,47 @@ impl App {
         // Registration can fail at runtime — most commonly on Windows when the
         // combo is already owned by another app/IME, but the manager itself can
         // fail too. Under panic="abort" an .expect() here hard-kills the whole
-        // tray app at launch with no visible message. Degrade gracefully:
-        // leave hotkeys = None, keep the tray/menu alive, and tell the user how
-        // to recover (change ptt_key via the tray's Edit Settings, then relaunch).
-        let manager = match GlobalHotKeyManager::new() {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("[holler] could not initialise global hotkeys ({e}); push-to-talk disabled.");
-                return;
-            }
-        };
-        self.ptt_hotkey_id = ptt_hotkey.id();
-        if let Err(e) = manager.register(ptt_hotkey) {
-            eprintln!(
-                "[holler] could not register PTT key {ptt_label} — it may already be in use by \
-                 another app. Change ptt_key in config.toml and relaunch ({e})."
-            );
-            return;
-        }
-        self.hotkeys = Some(manager);
-
-        // `global-hotkey` has no callback API — only a static channel. Drain it
-        // on a dedicated thread that BLOCKS on recv() and forwards via the
-        // proxy, so the main loop can stay in ControlFlow::Wait (event-driven,
-        // no polling — PLAN.md §6) yet still wake instantly on a key event.
-        let proxy = self.proxy.clone();
-        std::thread::Builder::new()
-            .name("holler-hotkey-rx".into())
-            .spawn(move || {
-                let rx = GlobalHotKeyEvent::receiver();
-                while let Ok(event) = rx.recv() {
-                    if proxy.send_event(UserEvent::Hotkey(event)).is_err() {
-                        break; // loop is gone — stop forwarding.
+        // tray app at launch with no visible message. Degrade gracefully: keep
+        // the manager (and the tray/menu/overlay) alive with PTT disabled —
+        // the user can pick a free combo live via Settings → Hotkey.
+        match GlobalHotKeyManager::new() {
+            Ok(manager) => {
+                match manager.register(ptt_hotkey) {
+                    Ok(()) => self.ptt_hotkey_id = Some(ptt_hotkey.id()),
+                    Err(e) => {
+                        eprintln!(
+                            "[holler] could not register PTT key {ptt_label} — it may already be \
+                             in use by another app. Pick another combo in Settings → Hotkey ({e})."
+                        );
+                        self.set_tray_tooltip(
+                            "Holler — PTT key unavailable; pick another in Settings → Hotkey",
+                        );
                     }
                 }
-            })
-            .expect("spawn hotkey forwarder thread");
+                self.hotkeys = Some(manager);
+
+                // `global-hotkey` has no callback API — only a static channel.
+                // Drain it on a dedicated thread that BLOCKS on recv() and
+                // forwards via the proxy, so the main loop can stay in
+                // ControlFlow::Wait (event-driven, no polling — PLAN.md §6)
+                // yet still wake instantly on a key event.
+                let proxy = self.proxy.clone();
+                std::thread::Builder::new()
+                    .name("holler-hotkey-rx".into())
+                    .spawn(move || {
+                        let rx = GlobalHotKeyEvent::receiver();
+                        while let Ok(event) = rx.recv() {
+                            if proxy.send_event(UserEvent::Hotkey(event)).is_err() {
+                                break; // loop is gone — stop forwarding.
+                            }
+                        }
+                    })
+                    .expect("spawn hotkey forwarder thread");
+            }
+            Err(e) => {
+                eprintln!("[holler] could not initialise global hotkeys ({e}); push-to-talk disabled.");
+            }
+        }
 
         // Desktop recording indicator — created lazily here so we have an event loop.
         self.overlay = Overlay::create(event_loop);
@@ -320,7 +327,7 @@ impl App {
     }
 
     fn on_hotkey(&mut self, event: GlobalHotKeyEvent) {
-        if event.id != self.ptt_hotkey_id {
+        if Some(event.id) != self.ptt_hotkey_id {
             return;
         }
         match event.state {
@@ -591,6 +598,71 @@ impl App {
             if granted { "granted — auto-paste active" } else { "revoked — clipboard fallback active" }
         );
     }
+
+    /// Apply the edits the settings UI confirmed this frame, then report each
+    /// outcome back to the panel that requested it.
+    fn handle_settings_actions(&mut self, actions: Vec<SettingsAction>) {
+        for action in actions {
+            match action {
+                SettingsAction::SaveGeneral {
+                    injection_mode,
+                    vad,
+                } => {
+                    self.config.injection_mode = injection_mode;
+                    self.config.vad = vad;
+                    let res = holler_config::save(&self.config).map_err(|e| e.to_string());
+                    match &res {
+                        Ok(()) => println!("[holler] config saved (general)"),
+                        Err(e) => eprintln!("[holler] config save failed: {e}"),
+                    }
+                    if let Some(sw) = &mut self.settings {
+                        sw.general_feedback(res);
+                    }
+                }
+                SettingsAction::ApplyPttKey(raw) => {
+                    let res = self.apply_ptt_key(&raw);
+                    if let Some(sw) = &mut self.settings {
+                        sw.hotkey_feedback(res);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Re-register the global PTT hotkey to `raw` (live, no restart) and
+    /// persist it. New combo registers BEFORE the old one is dropped, so a
+    /// conflict (combo owned by another app) leaves the current key working.
+    fn apply_ptt_key(&mut self, raw: &str) -> Result<String, String> {
+        if self.ptt_held {
+            return Err("release the push-to-talk key first".to_string());
+        }
+        let manager = self
+            .hotkeys
+            .as_ref()
+            .ok_or("global hotkeys are unavailable on this system")?;
+        let (new_hk, label) = holler_config::try_parse_ptt_key(raw)?;
+
+        if Some(new_hk.id()) != self.ptt_hotkey_id {
+            manager.register(new_hk).map_err(|e| {
+                format!("could not register {label} — is it taken by another app? ({e})")
+            })?;
+            if self.ptt_hotkey_id.is_some() {
+                // Drop the previous combo (re-derived from config — the same
+                // parse the original registration used).
+                let (old_hk, _) = holler_config::parse_ptt_key(&self.config.ptt_key);
+                let _ = manager.unregister(old_hk);
+            }
+            self.ptt_hotkey_id = Some(new_hk.id());
+        }
+
+        self.ptt_label = label.clone();
+        self.config.ptt_key = raw.to_string();
+        holler_config::save(&self.config)
+            .map_err(|e| format!("hotkey is active, but saving config failed: {e}"))?;
+        self.reset_tray_tooltip();
+        println!("[holler] PTT key changed — hold {label} to talk");
+        Ok(label)
+    }
 }
 
 impl ApplicationHandler<UserEvent> for App {
@@ -669,8 +741,12 @@ impl ApplicationHandler<UserEvent> for App {
                         // Already open — bring it to the front instead.
                         Some(sw) => sw.focus(),
                         None => {
-                            self.settings =
-                                SettingsWindow::create(event_loop, self.proxy.clone());
+                            self.settings = SettingsWindow::create(
+                                event_loop,
+                                self.proxy.clone(),
+                                &self.config,
+                                &self.ptt_label,
+                            );
                             if self.settings.is_none() {
                                 eprintln!("[holler] settings window unavailable (see logs)");
                                 self.set_tray_tooltip("Holler — settings window failed to open");
@@ -731,7 +807,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.settings_repaint_at = None;
                 println!("[holler] settings window closed");
             }
-            WindowEvent::RedrawRequested => sw.redraw(),
+            WindowEvent::RedrawRequested => {
+                let actions = sw.redraw();
+                self.handle_settings_actions(actions);
+            }
             event => {
                 if let WindowEvent::Resized(size) = &event {
                     sw.resized(*size);
