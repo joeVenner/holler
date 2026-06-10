@@ -22,3 +22,7 @@ models/
 # Editor
 .idea/
 *.swp
+
+# Personal project planning — stays local, never pushed (Yassir, 2026-06-10)
+/docs/
+/CLAUDE.md
