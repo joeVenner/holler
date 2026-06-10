@@ -140,6 +140,18 @@ jobs:
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then export VERSION="${GITHUB_REF_NAME#v}"; fi
           bash scripts/bundle-macos.sh
 
+      # Notarize + staple the .app FIRST, so the app a user drags out of the DMG
+      # is self-contained and passes Gatekeeper even offline. Skipped until
+      # secrets are configured.
+      - name: Notarize & staple the app
+        if: env.APPLE_ID != ''
+        run: |
+          ditto -c -k --keepParent Holler.app Holler-app.zip
+          xcrun notarytool submit Holler-app.zip \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple Holler.app
+
       - name: Create universal DMG
         run: |
           hdiutil create -volname Holler \
@@ -147,11 +159,13 @@ jobs:
             -ov -format UDZO \
             Holler-macOS-universal.dmg
 
-      # Notarize the DMG with Apple and staple the ticket so it installs without
-      # a Gatekeeper warning, even offline. Skipped until secrets are configured.
-      - name: Notarize & staple
+      # Sign the DMG with Developer ID, then notarize + staple it so the DMG
+      # itself (not just its contents) passes Gatekeeper, even offline. Skipped
+      # until secrets are configured.
+      - name: Sign, notarize & staple the DMG
         if: env.APPLE_ID != ''
         run: |
+          codesign --force --timestamp --sign "$MACOS_SIGN_IDENTITY" Holler-macOS-universal.dmg
           xcrun notarytool submit Holler-macOS-universal.dmg \
             --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
             --password "$APPLE_APP_PASSWORD" --wait
