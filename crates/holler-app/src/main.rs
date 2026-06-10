@@ -625,6 +625,43 @@ impl App {
                         sw.hotkey_feedback(res);
                     }
                 }
+                SettingsAction::SaveProviders { provider, model } => {
+                    self.config.stt_provider = provider;
+                    self.config.stt_model = model;
+                    let res = holler_config::save(&self.config).map_err(|e| e.to_string());
+                    match &res {
+                        Ok(()) => println!(
+                            "[holler] config saved — provider {} ({})",
+                            self.config.stt_provider,
+                            self.config.model_override().unwrap_or("default model")
+                        ),
+                        Err(e) => eprintln!("[holler] config save failed: {e}"),
+                    }
+                    if let Some(sw) = &mut self.settings {
+                        sw.provider_feedback(res);
+                    }
+                }
+                SettingsAction::SetKey { provider, key } => {
+                    let res =
+                        holler_config::store_secret(&provider, &key).map_err(|e| e.to_string());
+                    match &res {
+                        Ok(()) => println!("[holler] stored {provider} API key"),
+                        Err(e) => eprintln!("[holler] storing {provider} key failed: {e}"),
+                    }
+                    if let Some(sw) = &mut self.settings {
+                        sw.key_feedback(&provider, res);
+                    }
+                }
+                SettingsAction::ClearKey { provider } => {
+                    let res = holler_config::remove_secret(&provider).map_err(|e| e.to_string());
+                    match &res {
+                        Ok(()) => println!("[holler] cleared {provider} API key"),
+                        Err(e) => eprintln!("[holler] clearing {provider} key failed: {e}"),
+                    }
+                    if let Some(sw) = &mut self.settings {
+                        sw.key_feedback(&provider, res);
+                    }
+                }
             }
         }
     }

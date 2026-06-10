@@ -6,7 +6,9 @@
 //! `*_feedback` methods. That keeps config writes and hotkey re-registration
 //! in one place (`App`) and the UI a pure function of its state.
 
-use holler_config::Config;
+use std::collections::BTreeMap;
+
+use holler_config::{Config, SecretStatus};
 
 /// One user-confirmed edit, applied by `App` after the frame.
 pub enum SettingsAction {
@@ -16,7 +18,71 @@ pub enum SettingsAction {
     /// and persist it. The combo has already passed `try_parse_ptt_key` once
     /// in the UI, but `App` validates again — it owns the truth.
     ApplyPttKey(String),
+    /// Persist the active STT provider + model override.
+    SaveProviders { provider: String, model: String },
+    /// Store an API key in secrets.toml. The key string lives only for the
+    /// trip UI → App → file; it is never echoed back.
+    SetKey { provider: String, key: String },
+    /// Remove a provider's API key from secrets.toml.
+    ClearKey { provider: String },
 }
+
+/// Everything the Providers panel needs to render one provider row. Adding a
+/// provider = adding a line here (+ its real backend in holler-stt when ready).
+struct ProviderMeta {
+    /// Config/secrets identifier ("deepgram") — also the `set-key` account.
+    id: &'static str,
+    name: &'static str,
+    kind: &'static str, // "Cloud" | "Local"
+    default_model: &'static str,
+    /// false → disabled "Coming soon" row.
+    available: bool,
+}
+
+const PROVIDERS: &[ProviderMeta] = &[
+    ProviderMeta {
+        id: "deepgram",
+        name: "Deepgram",
+        kind: "Cloud",
+        default_model: holler_stt::DeepgramStt::DEFAULT_MODEL,
+        available: true,
+    },
+    ProviderMeta {
+        id: "openai",
+        name: "OpenAI",
+        kind: "Cloud",
+        default_model: holler_stt::OpenAiStt::DEFAULT_MODEL,
+        available: true,
+    },
+    ProviderMeta {
+        id: "groq",
+        name: "Groq Whisper",
+        kind: "Cloud",
+        default_model: "",
+        available: false,
+    },
+    ProviderMeta {
+        id: "elevenlabs",
+        name: "ElevenLabs Scribe",
+        kind: "Cloud",
+        default_model: "",
+        available: false,
+    },
+    ProviderMeta {
+        id: "local-whisper",
+        name: "LocalWhisper",
+        kind: "Local",
+        default_model: "",
+        available: false,
+    },
+    ProviderMeta {
+        id: "parakeet",
+        name: "NVIDIA Parakeet",
+        kind: "Local",
+        default_model: "",
+        available: false,
+    },
+];
 
 /// The settings sections, in sidebar order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,12 +147,29 @@ pub(super) struct UiState {
     ptt_label: String,
     capturing: bool,
     hotkey_status: Option<(bool, String)>,
+    // Providers: selection draft vs saved, per-provider key entry + status.
+    provider_draft: String,
+    model_draft: String,
+    provider_saved: String,
+    model_saved: String,
+    provider_status: Option<(bool, String)>,
+    key_drafts: BTreeMap<&'static str, String>,
+    key_status: BTreeMap<&'static str, SecretStatus>,
     /// Edits confirmed this frame, drained by `SettingsWindow::redraw`.
     pub(super) actions: Vec<SettingsAction>,
 }
 
 impl UiState {
     pub(super) fn new(config: &Config, ptt_label: &str) -> Self {
+        // Snapshot key presence once at window open (refreshed after every
+        // set/clear). This is a plain file read — secrets.toml replaced the
+        // keychain, so there is no OS prompt to worry about; the values
+        // themselves are never loaded here.
+        let key_status = PROVIDERS
+            .iter()
+            .filter(|p| p.available)
+            .map(|p| (p.id, holler_config::secret_status(p.id)))
+            .collect();
         Self {
             selected: Panel::General,
             injection_draft: config.injection_mode.clone(),
@@ -97,6 +180,13 @@ impl UiState {
             ptt_label: ptt_label.to_string(),
             capturing: false,
             hotkey_status: None,
+            provider_draft: config.stt_provider.clone(),
+            model_draft: config.stt_model.clone(),
+            provider_saved: config.stt_provider.clone(),
+            model_saved: config.stt_model.clone(),
+            provider_status: None,
+            key_drafts: BTreeMap::new(),
+            key_status,
             actions: Vec::new(),
         }
     }
@@ -124,6 +214,32 @@ impl UiState {
         });
     }
 
+    /// Outcome of a `SaveProviders` action.
+    pub(super) fn provider_feedback(&mut self, res: Result<(), String>) {
+        self.provider_status = Some(match res {
+            Ok(()) => {
+                self.provider_saved = self.provider_draft.clone();
+                self.model_saved = self.model_draft.clone();
+                (true, "Saved ✓ — used on the next dictation".to_string())
+            }
+            Err(e) => (false, e),
+        });
+    }
+
+    /// Outcome of a `SetKey`/`ClearKey` action; re-probes the key status so
+    /// the ✓/✗ reflects the file truth, not what we think happened.
+    pub(super) fn key_feedback(&mut self, provider: &str, res: Result<(), String>) {
+        if let Some(meta) = PROVIDERS.iter().find(|p| p.id == provider) {
+            self.key_status
+                .insert(meta.id, holler_config::secret_status(meta.id));
+            self.key_drafts.remove(meta.id); // never retain typed key material
+        }
+        self.provider_status = Some(match res {
+            Ok(()) => (true, "Key updated ✓".to_string()),
+            Err(e) => (false, e),
+        });
+    }
+
     pub(super) fn draw(&mut self, ui: &mut egui::Ui) {
         egui::Panel::left("settings-nav")
             .resizable(false)
@@ -143,6 +259,7 @@ impl UiState {
         egui::CentralPanel::default().show_inside(ui, |ui| match self.selected {
             Panel::General => self.draw_general(ui),
             Panel::Hotkey => self.draw_hotkey(ui),
+            Panel::Providers => self.draw_providers(ui),
             Panel::About => draw_about(ui),
             panel => draw_placeholder(ui, panel),
         });
@@ -225,6 +342,124 @@ impl UiState {
         ui.add_space(4.0);
         ui.weak("Applied immediately — no restart. The old combo stays active until the new one registers.");
         draw_status(ui, &self.hotkey_status);
+    }
+
+    fn draw_providers(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Providers");
+        ui.add_space(4.0);
+        ui.label("Speech-to-text runs through the selected provider (bring your own key).");
+        ui.add_space(8.0);
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for meta in PROVIDERS {
+                self.draw_provider_row(ui, meta);
+                ui.add_space(6.0);
+            }
+
+            ui.add_space(6.0);
+            let dirty = self.provider_draft != self.provider_saved
+                || self.model_draft != self.model_saved;
+            if ui.add_enabled(dirty, egui::Button::new("Save")).clicked() {
+                self.provider_status = None;
+                self.actions.push(SettingsAction::SaveProviders {
+                    provider: self.provider_draft.clone(),
+                    model: self.model_draft.trim().to_string(),
+                });
+            }
+            draw_status(ui, &self.provider_status);
+            ui.add_space(8.0);
+            ui.weak("Keys are stored in secrets.toml next to config.toml (never displayed here). \
+                     A HOLLER_<PROVIDER>_KEY environment variable overrides the file.");
+        });
+    }
+
+    /// One provider row: radio + key state for available providers, a
+    /// disabled "Coming soon" line for future ones.
+    fn draw_provider_row(&mut self, ui: &mut egui::Ui, meta: &ProviderMeta) {
+        if !meta.available {
+            ui.horizontal(|ui| {
+                ui.add_enabled(false, egui::RadioButton::new(false, meta.name));
+                ui.weak(format!("{} · Coming soon", meta.kind));
+            });
+            return;
+        }
+
+        ui.horizontal(|ui| {
+            if ui
+                .radio(self.provider_draft == meta.id, meta.name)
+                .clicked()
+                && self.provider_draft != meta.id
+            {
+                self.provider_draft = meta.id.to_string();
+                // A model override belongs to one provider — don't carry it over.
+                self.model_draft.clear();
+            }
+            ui.weak(meta.kind);
+            match self.key_status.get(meta.id) {
+                Some(SecretStatus::FromFile) => {
+                    ui.colored_label(egui::Color32::from_rgb(110, 200, 110), "key configured ✓");
+                }
+                Some(SecretStatus::FromEnv) => {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(110, 200, 110),
+                        "key configured ✓ (env var)",
+                    );
+                }
+                _ => {
+                    ui.weak("no key ✗");
+                }
+            }
+        });
+
+        // Model override applies to the selected provider only.
+        if self.provider_draft == meta.id {
+            ui.indent(meta.id, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Model:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.model_draft)
+                            .hint_text(format!("default: {}", meta.default_model))
+                            .desired_width(220.0),
+                    );
+                });
+            });
+        }
+
+        // Key entry: typed key material lives only until Set is clicked.
+        ui.indent((meta.id, "key"), |ui| {
+            let from_env = self.key_status.get(meta.id) == Some(&SecretStatus::FromEnv);
+            let draft = self.key_drafts.entry(meta.id).or_default();
+            ui.horizontal(|ui| {
+                ui.add_enabled(
+                    !from_env,
+                    egui::TextEdit::singleline(draft)
+                        .password(true)
+                        .hint_text("paste API key")
+                        .desired_width(220.0),
+                );
+                let can_set = !from_env && !draft.trim().is_empty();
+                if ui.add_enabled(can_set, egui::Button::new("Set key")).clicked() {
+                    let key = std::mem::take(draft);
+                    self.actions.push(SettingsAction::SetKey {
+                        provider: meta.id.to_string(),
+                        key: key.trim().to_string(),
+                    });
+                }
+                let can_clear =
+                    self.key_status.get(meta.id) == Some(&SecretStatus::FromFile);
+                if ui
+                    .add_enabled(can_clear, egui::Button::new("Clear"))
+                    .clicked()
+                {
+                    self.actions.push(SettingsAction::ClearKey {
+                        provider: meta.id.to_string(),
+                    });
+                }
+            });
+            if from_env {
+                ui.weak("Managed by the environment variable — unset it in your shell to change.");
+            }
+        });
     }
 }
 
