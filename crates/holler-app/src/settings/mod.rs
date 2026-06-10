@@ -11,6 +11,8 @@
 //! compile time and resident memory. The integration below mirrors the
 //! crate's own `examples/pure_glow.rs`.
 
+mod ui;
+
 use std::ffi::CString;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -29,90 +31,14 @@ use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::raw_window_handle::HasWindowHandle;
 use winit::window::{Window, WindowAttributes, WindowId};
 
+use holler_config::Config;
+use ui::UiState;
+pub use ui::SettingsAction;
+
 use crate::UserEvent;
 
 const INITIAL_SIZE: LogicalSize<f64> = LogicalSize::new(760.0, 520.0);
 const MIN_SIZE: LogicalSize<f64> = LogicalSize::new(640.0, 420.0);
-
-/// The settings sections, in sidebar order. Routing only for now — each
-/// placeholder panel is replaced by the real thing in P2–P6.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Panel {
-    General,
-    Hotkey,
-    Providers,
-    Permissions,
-    History,
-    Stats,
-    About,
-}
-
-impl Panel {
-    const ALL: [Self; 7] = [
-        Self::General,
-        Self::Hotkey,
-        Self::Providers,
-        Self::Permissions,
-        Self::History,
-        Self::Stats,
-        Self::About,
-    ];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::General => "General",
-            Self::Hotkey => "Hotkey",
-            Self::Providers => "Providers",
-            Self::Permissions => "Permissions",
-            Self::History => "History",
-            Self::Stats => "Stats",
-            Self::About => "About",
-        }
-    }
-
-    /// One-liner shown under the placeholder heading.
-    fn blurb(self) -> &'static str {
-        match self {
-            Self::General => "Injection mode, VAD and other behaviour.",
-            Self::Hotkey => "The push-to-talk combo.",
-            Self::Providers => "Speech-to-text providers and API keys.",
-            Self::Permissions => "Microphone and Accessibility status.",
-            Self::History => "Your transcript history.",
-            Self::Stats => "Local usage statistics.",
-            Self::About => "About Holler.",
-        }
-    }
-}
-
-/// Pure UI state — kept apart from the GL/egui plumbing so `redraw` can
-/// borrow it and `EguiGlow` mutably at the same time.
-struct UiState {
-    selected: Panel,
-}
-
-impl UiState {
-    fn draw(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::left("settings-nav")
-            .resizable(false)
-            .exact_size(160.0)
-            .show_inside(ui, |ui| {
-                ui.add_space(8.0);
-                for panel in Panel::ALL {
-                    if ui
-                        .selectable_label(self.selected == panel, panel.label())
-                        .clicked()
-                    {
-                        self.selected = panel;
-                    }
-                }
-            });
-
-        egui::CentralPanel::default().show_inside(ui, |ui| match self.selected {
-            Panel::About => draw_about(ui),
-            panel => draw_placeholder(ui, panel),
-        });
-    }
-}
 
 /// The settings window plus everything it needs to paint itself. Dropping
 /// this frees the egui state, the GL context and the window in one go.
@@ -135,6 +61,8 @@ impl SettingsWindow {
     pub fn create(
         event_loop: &ActiveEventLoop,
         proxy: EventLoopProxy<UserEvent>,
+        config: &Config,
+        ptt_label: &str,
     ) -> Option<Self> {
         let attrs = WindowAttributes::default()
             .with_title("Holler Settings")
@@ -261,14 +189,13 @@ impl SettingsWindow {
             gl_surface,
             gl,
             egui_glow,
-            ui: UiState {
-                selected: Panel::General,
-            },
+            ui: UiState::new(config, ptt_label),
             shown: false,
         };
         // Paint before showing so the window appears with content, and don't
         // rely on a RedrawRequested ever being delivered to a hidden window.
-        this.redraw();
+        // (No actions can come out of the very first frame.)
+        let _ = this.redraw();
         Some(this)
     }
 
@@ -302,11 +229,13 @@ impl SettingsWindow {
         );
     }
 
-    /// Run the egui frame and paint it.
-    pub fn redraw(&mut self) {
+    /// Run the egui frame and paint it. Returns the edits the user confirmed
+    /// this frame, for `App` to apply (config writes, hotkey re-register).
+    pub fn redraw(&mut self) -> Vec<SettingsAction> {
         let ui_state = &mut self.ui; // disjoint borrow next to egui_glow
         self.egui_glow
             .run(&self.window, |ui| ui_state.draw(ui));
+        let actions = std::mem::take(&mut self.ui.actions);
 
         use glow::HasContext as _;
         // SAFETY: plain state-set + clear on our own current context.
@@ -316,7 +245,7 @@ impl SettingsWindow {
         }
         self.egui_glow.paint(&self.window);
         if self.gl_surface.swap_buffers(&self.gl_context).is_err() {
-            return; // context lost — the user can close/reopen the window.
+            return actions; // context lost — the user can close/reopen the window.
         }
 
         if !self.shown {
@@ -324,6 +253,20 @@ impl SettingsWindow {
             self.window.set_visible(true);
             self.focus();
         }
+        actions
+    }
+
+    /// Report the outcome of a `SaveGeneral` action back to the panel.
+    pub fn general_feedback(&mut self, res: Result<(), String>) {
+        self.ui.general_feedback(res);
+        self.request_redraw();
+    }
+
+    /// Report the outcome of an `ApplyPttKey` action back to the panel.
+    /// `Ok` carries the new human-readable combo label.
+    pub fn hotkey_feedback(&mut self, res: Result<String, String>) {
+        self.ui.hotkey_feedback(res);
+        self.request_redraw();
     }
 }
 
@@ -337,23 +280,3 @@ impl Drop for SettingsWindow {
     }
 }
 
-/// Placeholder panel body — replaced section by section in P2–P6.
-fn draw_placeholder(ui: &mut egui::Ui, panel: Panel) {
-    ui.heading(panel.label());
-    ui.add_space(4.0);
-    ui.label(panel.blurb());
-    ui.add_space(12.0);
-    ui.weak("Coming soon.");
-}
-
-/// About — already real: name, version, licence. Cheap and final.
-fn draw_about(ui: &mut egui::Ui) {
-    ui.heading("Holler");
-    ui.add_space(4.0);
-    ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
-    ui.add_space(8.0);
-    ui.label("Push-to-talk dictation — a walkie-talkie for your agents.");
-    ui.label("Hold the hotkey, speak, release: the transcript lands at your cursor.");
-    ui.add_space(12.0);
-    ui.weak("© 2026 joeVenner — MIT OR Apache-2.0");
-}

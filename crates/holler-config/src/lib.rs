@@ -7,7 +7,7 @@
 
 pub mod ptt;
 pub mod secrets;
-pub use ptt::parse_ptt_key;
+pub use ptt::{parse_ptt_key, try_parse_ptt_key};
 pub use secrets::{load_secret, secrets_path, store_secret};
 
 use std::fs;
