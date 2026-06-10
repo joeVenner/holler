@@ -24,6 +24,7 @@
 mod icons;
 mod overlay;
 mod permissions;
+mod settings;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -48,6 +49,7 @@ use winit::{
     window::WindowId,
 };
 use overlay::Overlay;
+use settings::SettingsWindow;
 
 /// How often the tray animation advances a frame.
 const FRAME_INTERVAL: Duration = Duration::from_millis(90);
@@ -78,6 +80,9 @@ enum UserEvent {
     /// A finished transcription (or a rendered error) from the worker thread.
     /// Carried back into the loop so delivery stays on the main thread.
     Transcript(Result<Transcription, String>),
+    /// egui asked for a repaint of the settings window after this delay
+    /// (zero = now). Sent from the repaint callback installed on its Context.
+    SettingsRepaint(Duration),
 }
 
 /// A successful transcription plus which provider produced it (for history).
@@ -134,6 +139,12 @@ struct App {
     last_ax_check: Instant,
     /// Desktop recording indicator shown during PTT hold.
     overlay: Option<Overlay>,
+    /// The egui settings window — exists only while open (PLAN.md §6).
+    settings: Option<SettingsWindow>,
+    /// When egui asked to be repainted (cursor blink, animations). Drives a
+    /// `ControlFlow::WaitUntil` wake; cleared once the redraw is requested.
+    settings_repaint_at: Option<Instant>,
+    settings_item_id: Option<MenuId>,
 }
 
 impl App {
@@ -179,6 +190,9 @@ impl App {
             accessibility_ok,
             accessibility_warned: false,
             overlay: None,
+            settings: None,
+            settings_repaint_at: None,
+            settings_item_id: None,
         }
     }
 
@@ -218,11 +232,14 @@ impl App {
         menu.append(&PredefinedMenuItem::separator()).expect("separator");
 
         // Settings section.
+        let settings_item = MenuItem::new("Settings…", true, None);
         let config_item = MenuItem::new("Edit Settings (config.toml)…", true, None);
         let history_item = MenuItem::new("Open History Folder…", true, None);
+        menu.append(&settings_item).expect("append settings item");
         menu.append(&config_item).expect("append config item");
         menu.append(&history_item).expect("append history item");
         menu.append(&PredefinedMenuItem::separator()).expect("separator");
+        self.settings_item_id = Some(settings_item.id().clone());
 
         let quit_item = MenuItem::new("Quit Holler", true, None);
         menu.append(&quit_item).expect("append Quit menu item");
@@ -584,6 +601,8 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn new_events(&mut self, _: &ActiveEventLoop, cause: StartCause) {
         // Advance the tray + overlay animation when our frame timer fires.
+        // (A settings-repaint wake can land between animation frames and
+        // advance one a few ms early — cosmetically negligible.)
         if matches!(cause, StartCause::ResumeTimeReached { .. })
             && self.tray_state != TrayState::Idle
         {
@@ -593,6 +612,13 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(ov) = &mut self.overlay {
                     ov.render(self.anim_frame);
                 }
+            }
+        }
+        // A deferred egui repaint (cursor blink etc.) has come due.
+        if let (Some(at), Some(sw)) = (self.settings_repaint_at, &self.settings) {
+            if Instant::now() >= at {
+                self.settings_repaint_at = None;
+                sw.request_redraw();
             }
         }
         // Re-check Accessibility on every loop wake, rate-limited. Guarded by
@@ -605,19 +631,30 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Wake at the earliest pending deadline; sleep fully when none exists.
+        let now = Instant::now();
+        let mut wake: Option<Instant> = None;
         if self.tray_state != TrayState::Idle {
             // Animating — wake every frame.
-            event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + FRAME_INTERVAL));
-        } else if cfg!(target_os = "macos") && self.hotkeys.is_some() {
-            // macOS only: poll slowly while idle so the tray reflects an
-            // Accessibility grant OR revoke without a restart (previously only
-            // a grant was detected). Other OSes have no such permission, so
-            // they stay on a true no-poll idle below.
-            event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + AX_POLL_INTERVAL));
-        } else {
-            // Fully idle — sleep until an event arrives (no CPU burn).
-            event_loop.set_control_flow(ControlFlow::Wait);
+            wake = Some(now + FRAME_INTERVAL);
         }
+        if let Some(at) = self.settings_repaint_at {
+            // egui asked for a deferred repaint of the settings window.
+            wake = Some(wake.map_or(at, |w| w.min(at)));
+        }
+        if cfg!(target_os = "macos") && self.hotkeys.is_some() {
+            // macOS only: poll slowly so the tray reflects an Accessibility
+            // grant OR revoke without a restart. Other OSes have no such
+            // permission, so with nothing else pending they reach the true
+            // no-poll idle below.
+            let ax = now + AX_POLL_INTERVAL;
+            wake = Some(wake.map_or(ax, |w| w.min(ax)));
+        }
+        event_loop.set_control_flow(match wake {
+            Some(at) => ControlFlow::WaitUntil(at),
+            // Fully idle — sleep until an event arrives (no CPU burn).
+            None => ControlFlow::Wait,
+        });
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
@@ -627,6 +664,19 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.quit_item_id.as_ref() == Some(&e.id) {
                     println!("[holler] quit requested — exiting.");
                     event_loop.exit();
+                } else if self.settings_item_id.as_ref() == Some(&e.id) {
+                    match &self.settings {
+                        // Already open — bring it to the front instead.
+                        Some(sw) => sw.focus(),
+                        None => {
+                            self.settings =
+                                SettingsWindow::create(event_loop, self.proxy.clone());
+                            if self.settings.is_none() {
+                                eprintln!("[holler] settings window unavailable (see logs)");
+                                self.set_tray_tooltip("Holler — settings window failed to open");
+                            }
+                        }
+                    }
                 } else if self.config_item_id.as_ref() == Some(&e.id) {
                     open_in_os(holler_config::config_path().ok().as_deref());
                 } else if self.history_item_id.as_ref() == Some(&e.id) {
@@ -651,13 +701,47 @@ impl ApplicationHandler<UserEvent> for App {
                 self.set_tray_tooltip(&format!("Holler — {e}"));
                 self.set_tray_state(TrayState::Idle);
             }
+            UserEvent::SettingsRepaint(delay) => {
+                let Some(sw) = &self.settings else { return };
+                if delay.is_zero() {
+                    sw.request_redraw();
+                } else if let Some(at) = Instant::now().checked_add(delay) {
+                    // Keep the earliest pending deadline.
+                    self.settings_repaint_at =
+                        Some(self.settings_repaint_at.map_or(at, |cur| cur.min(at)));
+                }
+                // A delay too large for Instant means "no repaint needed".
+            }
         }
     }
 
     fn window_event(&mut self, _: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-        // Only the overlay window generates window events; close requests are ignored
-        // (the overlay is controlled by PTT state, not the user closing it).
-        let _ = (id, event);
+        // Route settings-window events to egui; everything else comes from the
+        // overlay, whose events are ignored (it is controlled by PTT state,
+        // not by the user closing it).
+        let Some(sw) = &mut self.settings else { return };
+        if sw.window_id() != id {
+            return;
+        }
+        match event {
+            WindowEvent::CloseRequested => {
+                // Drop the whole window + GL context + egui state — the
+                // settings GUI is only resident while open (PLAN.md §6).
+                self.settings = None;
+                self.settings_repaint_at = None;
+                println!("[holler] settings window closed");
+            }
+            WindowEvent::RedrawRequested => sw.redraw(),
+            event => {
+                if let WindowEvent::Resized(size) = &event {
+                    sw.resized(*size);
+                }
+                // Everything else (incl. Resized) feeds egui's input state.
+                if sw.on_window_event(&event) {
+                    sw.request_redraw();
+                }
+            }
+        }
     }
 }
 
