@@ -23,7 +23,7 @@ use glutin::display::{GetGlDisplay, GlDisplay};
 use glutin::prelude::{GlSurface, NotCurrentGlContext, PossiblyCurrentGlContext};
 use glutin::surface::{Surface, SurfaceAttributesBuilder, SwapInterval, WindowSurface};
 use glutin_winit::{ApiPreference, DisplayBuilder};
-use winit::dpi::{LogicalSize, PhysicalSize};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::raw_window_handle::HasWindowHandle;
@@ -31,7 +31,88 @@ use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::UserEvent;
 
-const INITIAL_SIZE: LogicalSize<f64> = LogicalSize::new(720.0, 480.0);
+const INITIAL_SIZE: LogicalSize<f64> = LogicalSize::new(760.0, 520.0);
+const MIN_SIZE: LogicalSize<f64> = LogicalSize::new(640.0, 420.0);
+
+/// The settings sections, in sidebar order. Routing only for now — each
+/// placeholder panel is replaced by the real thing in P2–P6.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Panel {
+    General,
+    Hotkey,
+    Providers,
+    Permissions,
+    History,
+    Stats,
+    About,
+}
+
+impl Panel {
+    const ALL: [Self; 7] = [
+        Self::General,
+        Self::Hotkey,
+        Self::Providers,
+        Self::Permissions,
+        Self::History,
+        Self::Stats,
+        Self::About,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Hotkey => "Hotkey",
+            Self::Providers => "Providers",
+            Self::Permissions => "Permissions",
+            Self::History => "History",
+            Self::Stats => "Stats",
+            Self::About => "About",
+        }
+    }
+
+    /// One-liner shown under the placeholder heading.
+    fn blurb(self) -> &'static str {
+        match self {
+            Self::General => "Injection mode, VAD and other behaviour.",
+            Self::Hotkey => "The push-to-talk combo.",
+            Self::Providers => "Speech-to-text providers and API keys.",
+            Self::Permissions => "Microphone and Accessibility status.",
+            Self::History => "Your transcript history.",
+            Self::Stats => "Local usage statistics.",
+            Self::About => "About Holler.",
+        }
+    }
+}
+
+/// Pure UI state — kept apart from the GL/egui plumbing so `redraw` can
+/// borrow it and `EguiGlow` mutably at the same time.
+struct UiState {
+    selected: Panel,
+}
+
+impl UiState {
+    fn draw(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::left("settings-nav")
+            .resizable(false)
+            .exact_size(160.0)
+            .show_inside(ui, |ui| {
+                ui.add_space(8.0);
+                for panel in Panel::ALL {
+                    if ui
+                        .selectable_label(self.selected == panel, panel.label())
+                        .clicked()
+                    {
+                        self.selected = panel;
+                    }
+                }
+            });
+
+        egui::CentralPanel::default().show_inside(ui, |ui| match self.selected {
+            Panel::About => draw_about(ui),
+            panel => draw_placeholder(ui, panel),
+        });
+    }
+}
 
 /// The settings window plus everything it needs to paint itself. Dropping
 /// this frees the egui state, the GL context and the window in one go.
@@ -41,6 +122,7 @@ pub struct SettingsWindow {
     gl_surface: Surface<WindowSurface>,
     gl: Arc<glow::Context>,
     egui_glow: EguiGlow,
+    ui: UiState,
     /// False until the first frame has been painted — the window is created
     /// hidden and revealed only once it has content (avoids a white flash).
     shown: bool,
@@ -57,7 +139,26 @@ impl SettingsWindow {
         let attrs = WindowAttributes::default()
             .with_title("Holler Settings")
             .with_inner_size(INITIAL_SIZE)
+            .with_min_inner_size(MIN_SIZE)
             .with_visible(false);
+        // Centre on the primary monitor (same desktop-space maths as the
+        // overlay — monitor origins are global, not (0,0); DISCOVERIES).
+        let attrs = match event_loop
+            .primary_monitor()
+            .or_else(|| event_loop.available_monitors().next())
+        {
+            Some(monitor) => {
+                let size = monitor.size();
+                let origin = monitor.position();
+                let scale = monitor.scale_factor();
+                let win_w = (INITIAL_SIZE.width * scale) as i32;
+                let win_h = (INITIAL_SIZE.height * scale) as i32;
+                let x = origin.x + (size.width as i32 - win_w) / 2;
+                let y = origin.y + (size.height as i32 - win_h) / 2;
+                attrs.with_position(PhysicalPosition::new(x, y))
+            }
+            None => attrs, // OS default placement
+        };
 
         // Let glutin-winit pair a GL config with the winit window. Native API
         // first (WGL / CGL), EGL as the fallback (egui#2520).
@@ -150,12 +251,19 @@ impl SettingsWindow {
             let _ = proxy.send_event(UserEvent::SettingsRepaint(info.delay));
         });
 
+        // App theme: dark, matching the tray/overlay look, independent of the
+        // OS theme so the window is consistent across platforms.
+        egui_glow.egui_ctx.set_theme(egui::Theme::Dark);
+
         let mut this = Self {
             window,
             gl_context,
             gl_surface,
             gl,
             egui_glow,
+            ui: UiState {
+                selected: Panel::General,
+            },
             shown: false,
         };
         // Paint before showing so the window appears with content, and don't
@@ -196,7 +304,9 @@ impl SettingsWindow {
 
     /// Run the egui frame and paint it.
     pub fn redraw(&mut self) {
-        self.egui_glow.run(&self.window, draw_ui);
+        let ui_state = &mut self.ui; // disjoint borrow next to egui_glow
+        self.egui_glow
+            .run(&self.window, |ui| ui_state.draw(ui));
 
         use glow::HasContext as _;
         // SAFETY: plain state-set + clear on our own current context.
@@ -227,13 +337,23 @@ impl Drop for SettingsWindow {
     }
 }
 
-/// The whole settings UI. P0 spike: an intentionally empty shell that proves
-/// text + widgets render; the real panels arrive with P1/P2. The CentralPanel
-/// supplies the theme background fill (the root `Ui` of `run_ui` has none).
-fn draw_ui(ui: &mut egui::Ui) {
-    egui::CentralPanel::default().show_inside(ui, |ui| {
-        ui.heading("Holler Settings");
-        ui.add_space(8.0);
-        ui.label("Integration spike — the settings panels land here next.");
-    });
+/// Placeholder panel body — replaced section by section in P2–P6.
+fn draw_placeholder(ui: &mut egui::Ui, panel: Panel) {
+    ui.heading(panel.label());
+    ui.add_space(4.0);
+    ui.label(panel.blurb());
+    ui.add_space(12.0);
+    ui.weak("Coming soon.");
+}
+
+/// About — already real: name, version, licence. Cheap and final.
+fn draw_about(ui: &mut egui::Ui) {
+    ui.heading("Holler");
+    ui.add_space(4.0);
+    ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+    ui.add_space(8.0);
+    ui.label("Push-to-talk dictation — a walkie-talkie for your agents.");
+    ui.label("Hold the hotkey, speak, release: the transcript lands at your cursor.");
+    ui.add_space(12.0);
+    ui.weak("© 2026 joeVenner — MIT OR Apache-2.0");
 }
