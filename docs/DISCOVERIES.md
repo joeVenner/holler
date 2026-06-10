@@ -12,6 +12,18 @@ Append hard-learned technical lessons and edge cases here, newest first, using t
 
 ---
 
+## [2026-06-10] Context Update — egui settings window spike (renderer: egui_glow, not egui-wgpu)
+- **What changed:** P0 of the GUI backlog: a "Settings…" tray item opens an (intentionally empty) egui window rendered inside the existing single winit loop via **manual `egui-winit` integration** (`egui_glow::EguiGlow`); closing it drops the window, GL context and all egui state (PLAN.md §6). Tray, PTT hotkey and the softbuffer overlay are untouched.
+- **Renderer decision — `egui_glow 0.34.3` + `glutin 0.32.3` over `egui-wgpu`/softbuffer:** glow is eframe's own default renderer (battle-tested), drives the system OpenGL driver (WGL on Windows, CGL on macOS — deprecated since 10.14 but still shipping), and costs a fraction of wgpu's dependency tree, compile time and resident memory. A softbuffer-backed egui (CPU-rasterising tessellated meshes) is unsupported community territory — rejected. The integration is isolated in `settings.rs`, so swapping to `egui-wgpu` later (if Apple ever drops GL) touches one file. PLAN.md §34 updated accordingly.
+- **Hard-learned lessons:**
+  - **Version chain that unifies:** egui/egui-winit/egui_glow **0.34.3** + glutin **0.32.3** + glutin-winit **0.5.0** all agree on winit **0.30.13** — no duplicate-winit split. `egui_glow` re-exports `glow` AND `egui_winit` (via its `winit` feature), so neither needs to be a direct dependency.
+  - **egui 0.34 `EguiGlow::run` no longer returns a repaint delay** (older docs/examples disagree). Repaint scheduling now comes exclusively through `Context::set_request_repaint_callback`; we forward `info.delay` over the existing `EventLoopProxy` as `UserEvent::SettingsRepaint` and fold it into `about_to_wait`'s earliest-deadline `ControlFlow::WaitUntil`. Also, 0.34's `Context::run_ui` root `Ui` has **no background fill** — wrap the UI in a `CentralPanel` or you get text painted on the raw GL clear color.
+  - **Paint the first frame before `set_visible(true)`.** Don't wait for a `RedrawRequested` on a hidden window (not all platforms deliver one); `SettingsWindow::create` paints synchronously, then shows + focuses. Avoids the white flash (egui#2279).
+  - **LSUIElement agents can still take key focus:** winit's `Window::focus_window()` on macOS calls `activateIgnoringOtherApps(true)` + `makeKeyAndOrderFront`, which is exactly what an Accessory-policy app needs to bring the settings window to the front. No activation-policy juggling required (winit 0.30 has no runtime policy setter anyway).
+  - `glutin-winit`'s `DisplayBuilder` works fine against a *running* loop's `ActiveEventLoop` — on-demand GL window creation from a tray-menu click is unproblematic. Use `ApiPreference::FallbackEgl` (native WGL/CGL first; egui#2520).
+- **Impact:** `holler-app` (new `settings.rs`; `main.rs` menu + event routing + merged wake deadlines), `Cargo.toml`/lock.
+- **Reference:** commit `f2765d4`, branch `feature/gui-egui-spike`; `crates/holler-app/src/settings.rs`.
+
 ## [2026-06-10] Context Update — Cross-platform hardening + release readiness
 - **What changed:** Closed the gaps from a multi-agent review pass making Holler genuinely native on both macOS and Windows and cleanly releasable. Key edits:
   - **API keys: keychain → `secrets.toml`** (`holler-config::secrets`, `0600` on Unix, env-var override). Dropped the `keyring` dependency entirely. Reverses the original DECISIONS.md "keys in keychain" choice (see that file).
