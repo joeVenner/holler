@@ -1539,6 +1539,8 @@ dependencies = [
  "holler-store",
  "holler-stt",
  "mimalloc",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
  "softbuffer",
  "tray-icon",
  "winit",

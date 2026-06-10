@@ -29,3 +29,10 @@ egui = "0.34.3"
 egui_glow = { version = "0.34.3", features = ["winit"] }
 glutin = "0.32.3"
 glutin-winit = "0.5.0"
+
+# macOS-only: query AVCaptureDevice for live microphone authorization status
+# (permissions.rs). Pinned to the objc2 0.6 / objc2-foundation 0.3 versions
+# winit already brings in transitively, so this adds no new crates to compile.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
