@@ -134,10 +134,15 @@ struct App {
     /// Tray menu item IDs (for click routing).
     grant_access_item_id: Option<MenuId>,
     grant_mic_item_id: Option<MenuId>,
-    /// Retained menu items so we can update their text/enabled state at runtime.
-    ax_menu_item: Option<MenuItem>,
+    /// The tray menu (retained clone — muda's `Menu` is a shared handle, so
+    /// mutating this reflects in the live NSMenu) plus the two Grant items and
+    /// their group separator. The permission poll shows/hides each Grant entry
+    /// so it appears ONLY while that permission is actually missing — no
+    /// permanent disabled status rows cluttering the menu.
+    tray_menu: Option<Menu>,
     grant_access_menu_item: Option<MenuItem>,
-    mic_menu_item: Option<MenuItem>,
+    grant_mic_menu_item: Option<MenuItem>,
+    grant_block_sep: Option<PredefinedMenuItem>,
     /// Last microphone status seen by the poll — drives live tray/panel updates.
     last_mic_status: permissions::MicStatus,
     /// Timestamp of the last permission poll (rate-limits AXIsProcessTrusted /
@@ -182,9 +187,10 @@ impl App {
             history_item_id: None,
             grant_access_item_id: None,
             grant_mic_item_id: None,
-            ax_menu_item: None,
+            tray_menu: None,
             grant_access_menu_item: None,
-            mic_menu_item: None,
+            grant_mic_menu_item: None,
+            grant_block_sep: None,
             last_mic_status: permissions::microphone_status(),
             last_ax_check: Instant::now(),
             tray_state: TrayState::Idle,
@@ -214,32 +220,13 @@ impl App {
         }
 
         // --- Tray icon + menu ---
+        // The menu stays native (NSMenu on macOS) and lean: the always-actions
+        // (Settings / history / Quit) are appended once here; the two "Grant …"
+        // prompts are inserted at the top only while a permission is missing
+        // (see `rebuild_grant_block`, driven by the permission poll).
         let menu = Menu::new();
 
-        // Permissions section.
-        let mic_item = MenuItem::new(self.last_mic_status.tray_label(), false, None); // disabled status label
-        let ax_label = if self.accessibility_ok {
-            "✓  Accessibility (auto-paste active)".to_string()
-        } else {
-            "✗  Accessibility (auto-paste disabled)".to_string()
-        };
-        let ax_item = MenuItem::new(ax_label, false, None);
-        let grant_access_item = MenuItem::new("   Grant Accessibility Access…", !self.accessibility_ok, None);
-        let grant_mic_item = MenuItem::new("   Grant Microphone Access…", true, None);
-        menu.append(&mic_item).expect("append mic item");
-        menu.append(&ax_item).expect("append ax item");
-        menu.append(&grant_access_item).expect("append grant-access item");
-        menu.append(&grant_mic_item).expect("append grant-mic item");
-        self.grant_access_item_id = Some(grant_access_item.id().clone());
-        self.grant_mic_item_id = Some(grant_mic_item.id().clone());
-        // Retain items so refresh_permissions() can update their labels live.
-        self.ax_menu_item = Some(ax_item);
-        self.grant_access_menu_item = Some(grant_access_item);
-        self.mic_menu_item = Some(mic_item);
-
-        menu.append(&PredefinedMenuItem::separator()).expect("separator");
-
-        // Settings section.
+        // Always-present actions.
         let settings_item = MenuItem::new("Settings…", true, None);
         let config_item = MenuItem::new("Edit Settings (config.toml)…", true, None);
         let history_item = MenuItem::new("Open History Folder…", true, None);
@@ -247,13 +234,26 @@ impl App {
         menu.append(&config_item).expect("append config item");
         menu.append(&history_item).expect("append history item");
         menu.append(&PredefinedMenuItem::separator()).expect("separator");
-        self.settings_item_id = Some(settings_item.id().clone());
-
         let quit_item = MenuItem::new("Quit Holler", true, None);
         menu.append(&quit_item).expect("append Quit menu item");
+        self.settings_item_id = Some(settings_item.id().clone());
         self.config_item_id = Some(config_item.id().clone());
         self.history_item_id = Some(history_item.id().clone());
         self.quit_item_id = Some(quit_item.id().clone());
+
+        // Grant prompts — built once, shown on demand. Clean labels, no leading
+        // spaces or ✓/✗ glyphs; they only ever appear when actionable.
+        let grant_access_item = MenuItem::new("Grant Accessibility Access…", true, None);
+        let grant_mic_item = MenuItem::new("Grant Microphone Access…", true, None);
+        self.grant_access_item_id = Some(grant_access_item.id().clone());
+        self.grant_mic_item_id = Some(grant_mic_item.id().clone());
+        self.grant_access_menu_item = Some(grant_access_item);
+        self.grant_mic_menu_item = Some(grant_mic_item);
+        self.grant_block_sep = Some(PredefinedMenuItem::separator());
+        // Retain a handle to the live menu, then reconcile the Grant block to
+        // the current permission state before the tray is shown.
+        self.tray_menu = Some(menu.clone());
+        self.rebuild_grant_block();
 
         // Parse the PTT combo from config; falls back to Ctrl+Alt+Space on error.
         let (ptt_hotkey, ptt_label) = holler_config::parse_ptt_key(&self.config.ptt_key);
@@ -591,16 +591,6 @@ impl App {
             changed = true;
             self.accessibility_ok = granted;
             self.accessibility_warned = false; // allow fresh log on next delivery
-            if let Some(item) = &self.ax_menu_item {
-                item.set_text(if granted {
-                    "✓  Accessibility (auto-paste active)"
-                } else {
-                    "✗  Accessibility (auto-paste disabled)"
-                });
-            }
-            if let Some(item) = &self.grant_access_menu_item {
-                item.set_enabled(!granted);
-            }
             println!(
                 "[holler] Accessibility {}",
                 if granted { "granted — auto-paste active" } else { "revoked — clipboard fallback active" }
@@ -611,16 +601,55 @@ impl App {
         if mic != self.last_mic_status {
             changed = true;
             self.last_mic_status = mic;
-            if let Some(item) = &self.mic_menu_item {
-                item.set_text(mic.tray_label());
-            }
             println!("[holler] Microphone status: {mic:?}");
         }
 
-        // Push the fresh status into the panel if it's open and showing it.
         if changed {
+            // Show/hide the Grant prompts to match the new state, and push the
+            // fresh status into the panel if it's open and showing it.
+            self.rebuild_grant_block();
             if let Some(sw) = &mut self.settings {
                 sw.refresh_permissions();
+            }
+        }
+    }
+
+    /// Reconcile the tray's "Grant …" prompts with the current permission state:
+    /// each entry is present at the top of the menu only while its permission is
+    /// missing, with a trailing separator off the rest of the menu. Idempotent —
+    /// safe to call whether or not the items are currently in the menu.
+    fn rebuild_grant_block(&self) {
+        let Some(menu) = &self.tray_menu else { return };
+
+        // Detach any existing block elements first (remove() errs harmlessly if
+        // the item isn't currently a child — we ignore that).
+        if let Some(item) = &self.grant_access_menu_item {
+            let _ = menu.remove(item);
+        }
+        if let Some(item) = &self.grant_mic_menu_item {
+            let _ = menu.remove(item);
+        }
+        if let Some(sep) = &self.grant_block_sep {
+            let _ = menu.remove(sep);
+        }
+
+        // Re-insert at the very top, in order, only the prompts that apply.
+        let mut pos = 0;
+        if !self.accessibility_ok {
+            if let Some(item) = &self.grant_access_menu_item {
+                let _ = menu.insert(item, pos);
+                pos += 1;
+            }
+        }
+        if !matches!(self.last_mic_status, permissions::MicStatus::Granted) {
+            if let Some(item) = &self.grant_mic_menu_item {
+                let _ = menu.insert(item, pos);
+                pos += 1;
+            }
+        }
+        if pos > 0 {
+            if let Some(sep) = &self.grant_block_sep {
+                let _ = menu.insert(sep, pos);
             }
         }
     }
