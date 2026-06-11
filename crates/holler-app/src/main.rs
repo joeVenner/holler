@@ -725,7 +725,54 @@ impl App {
                     permissions::open_mic_settings();
                     println!("[holler] opened Microphone settings — the panel updates automatically once changed.");
                 }
+                SettingsAction::LoadHistory { query } => {
+                    let res = self.load_history(&query);
+                    if let Some(sw) = &mut self.settings {
+                        sw.history_loaded(res);
+                    }
+                }
+                SettingsAction::CopyHistory { text } => {
+                    let res = match self.ensure_clipboard() {
+                        Some(cb) => cb
+                            .set_text(text)
+                            .map(|()| "Copied to clipboard ✓".to_string())
+                            .map_err(|e| e.to_string()),
+                        None => Err("clipboard unavailable".to_string()),
+                    };
+                    if let Some(sw) = &mut self.settings {
+                        sw.history_action_feedback(res);
+                    }
+                }
+                SettingsAction::DeleteHistory { id, query } => {
+                    // Delete, then reload the list so the panel shows the new
+                    // truth (and the deleted row is gone) in one round-trip.
+                    let deleted = match &self.history {
+                        Some(h) => h.delete(id).map_err(|e| e.to_string()),
+                        None => Err("history database unavailable".to_string()),
+                    };
+                    match deleted {
+                        Ok(()) => println!("[holler] deleted history entry {id}"),
+                        Err(ref e) => eprintln!("[holler] delete history failed: {e}"),
+                    }
+                    let reload = self.load_history(&query);
+                    if let Some(sw) = &mut self.settings {
+                        sw.history_loaded(reload);
+                        sw.history_action_feedback(
+                            deleted.map(|()| "Deleted ✓".to_string()),
+                        );
+                    }
+                }
             }
+        }
+    }
+
+    /// Query the transcript history filtered by `query` (empty = all), newest
+    /// first, for the Settings → History panel. Runs on the main thread — a
+    /// local SQLite `LIKE` scan is sub-millisecond, like the config saves here.
+    fn load_history(&self, query: &str) -> Result<Vec<holler_store::Entry>, String> {
+        match &self.history {
+            Some(h) => h.search(query).map_err(|e| e.to_string()),
+            None => Err("history database unavailable".to_string()),
         }
     }
 

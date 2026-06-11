@@ -119,6 +119,15 @@ impl History {
             .map_err(|e| StoreError::Db(e.to_string()))
     }
 
+    /// Delete the transcript with `id`. Idempotent — deleting a row that no
+    /// longer exists (e.g. a stale GUI list) is not an error.
+    pub fn delete(&self, id: i64) -> Result<(), StoreError> {
+        self.conn
+            .execute("DELETE FROM transcripts WHERE id = ?1", params![id])
+            .map_err(|e| StoreError::Db(e.to_string()))?;
+        Ok(())
+    }
+
     /// The most recent `limit` transcripts, newest first.
     pub fn recent(&self, limit: usize) -> Result<Vec<Entry>, StoreError> {
         let mut stmt = self
@@ -188,5 +197,32 @@ mod tests {
         assert_eq!(recent.len(), 3);
         // Newest (highest id) first.
         assert_eq!(recent[0].text, "entry 4");
+    }
+
+    #[test]
+    fn delete_removes_only_the_target_and_is_idempotent() {
+        let h = History::open_in_memory().unwrap();
+        let keep = h.record("keep me", "deepgram").unwrap();
+        let drop = h.record("delete me", "openai").unwrap();
+
+        h.delete(drop).unwrap();
+        let left = h.recent(10).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].id, keep);
+        assert_eq!(left[0].text, "keep me");
+
+        // Deleting an already-gone row is a no-op, not an error.
+        h.delete(drop).unwrap();
+        assert_eq!(h.recent(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn empty_search_returns_all_newest_first() {
+        let h = History::open_in_memory().unwrap();
+        h.record("first", "deepgram").unwrap();
+        h.record("second", "openai").unwrap();
+        let all = h.search("").unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].text, "second"); // newest first
     }
 }
