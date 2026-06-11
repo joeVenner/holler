@@ -288,6 +288,18 @@ impl SettingsWindow {
         self.ui.refresh_permissions();
         self.request_redraw();
     }
+
+    /// Feed a (re)loaded history list back into the History panel.
+    pub fn history_loaded(&mut self, res: Result<Vec<holler_store::Entry>, String>) {
+        self.ui.history_loaded(res);
+        self.request_redraw();
+    }
+
+    /// Report the outcome of a `CopyHistory`/`DeleteHistory` action.
+    pub fn history_action_feedback(&mut self, res: Result<String, String>) {
+        self.ui.history_action_feedback(res);
+        self.request_redraw();
+    }
 }
 
 impl Drop for SettingsWindow {
