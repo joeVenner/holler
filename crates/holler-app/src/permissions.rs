@@ -34,19 +34,6 @@ pub enum MicStatus {
     Restricted,
 }
 
-impl MicStatus {
-    /// The tray menu label for the current status — kept here so the tray and
-    /// the settings panel agree on how each state reads.
-    pub fn tray_label(self) -> &'static str {
-        match self {
-            MicStatus::Granted => "✓  Microphone",
-            MicStatus::NotDetermined => "•  Microphone (asks on first use)",
-            MicStatus::Denied => "✗  Microphone (denied)",
-            MicStatus::Restricted => "✗  Microphone (blocked)",
-        }
-    }
-}
-
 /// Current microphone authorization. This is a pure query — only an actual
 /// capture (or `requestAccessForMediaType:`) ever shows a prompt — so it is
 /// safe to call on a poll while the settings window is open.
@@ -133,17 +120,5 @@ mod tests {
     fn status_queries_do_not_panic() {
         let _ = accessibility_granted();
         let _ = microphone_status();
-    }
-
-    #[test]
-    fn every_mic_status_has_a_tray_label() {
-        for status in [
-            MicStatus::Granted,
-            MicStatus::Denied,
-            MicStatus::NotDetermined,
-            MicStatus::Restricted,
-        ] {
-            assert!(!status.tray_label().is_empty());
-        }
     }
 }
