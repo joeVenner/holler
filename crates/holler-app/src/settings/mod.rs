@@ -300,6 +300,12 @@ impl SettingsWindow {
         self.ui.history_action_feedback(res);
         self.request_redraw();
     }
+
+    /// Feed a freshly computed stats snapshot back into the Stats panel.
+    pub fn stats_loaded(&mut self, res: Result<holler_store::Stats, String>) {
+        self.ui.stats_loaded(res);
+        self.request_redraw();
+    }
 }
 
 impl Drop for SettingsWindow {

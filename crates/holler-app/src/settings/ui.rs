@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use holler_config::{Config, SecretStatus};
-use holler_store::Entry;
+use holler_store::{Entry, Stats};
 
 use crate::permissions::{self, MicStatus};
 
@@ -45,6 +45,9 @@ pub enum SettingsAction {
     /// Delete the history entry `id`, then reload the list filtered by `query`
     /// so the view reflects the new truth.
     DeleteHistory { id: i64, query: String },
+    /// Compute (or recompute) the usage statistics from the history DB.
+    /// `App` replies via `SettingsWindow::stats_loaded`.
+    LoadStats,
 }
 
 /// Everything the Providers panel needs to render one provider row. Adding a
@@ -138,19 +141,6 @@ impl Panel {
             Self::About => "About",
         }
     }
-
-    /// One-liner shown under the placeholder heading.
-    fn blurb(self) -> &'static str {
-        match self {
-            Self::General => "Injection mode, VAD and other behaviour.",
-            Self::Hotkey => "The push-to-talk combo.",
-            Self::Providers => "Speech-to-text providers and API keys.",
-            Self::Permissions => "Microphone and Accessibility status.",
-            Self::History => "Your transcript history.",
-            Self::Stats => "Local usage statistics.",
-            Self::About => "About Holler.",
-        }
-    }
 }
 
 /// Pure UI state — kept apart from the GL/egui plumbing so `redraw` can
@@ -188,6 +178,11 @@ pub(super) struct UiState {
     history_loaded: bool,
     history_status: Option<(bool, String)>,
     confirm_delete: Option<i64>,
+    // Stats: computed once on first view (or on Refresh). `None` = not loaded
+    // yet; `requested` stops us re-queuing the compute every frame.
+    stats: Option<Stats>,
+    stats_requested: bool,
+    stats_status: Option<(bool, String)>,
     /// Edits confirmed this frame, drained by `SettingsWindow::redraw`.
     pub(super) actions: Vec<SettingsAction>,
 }
@@ -228,6 +223,9 @@ impl UiState {
             history_loaded: false,
             history_status: None,
             confirm_delete: None,
+            stats: None,
+            stats_requested: false,
+            stats_status: None,
             actions: Vec::new(),
         }
     }
@@ -308,6 +306,15 @@ impl UiState {
         });
     }
 
+    /// Outcome of a `LoadStats` compute: store the snapshot or surface the
+    /// DB error in the panel's status line.
+    pub(super) fn stats_loaded(&mut self, res: Result<Stats, String>) {
+        match res {
+            Ok(s) => self.stats = Some(s),
+            Err(e) => self.stats_status = Some((false, e)),
+        }
+    }
+
     pub(super) fn draw(&mut self, ui: &mut egui::Ui) {
         egui::Panel::left("settings-nav")
             .resizable(false)
@@ -330,8 +337,8 @@ impl UiState {
             Panel::Providers => self.draw_providers(ui),
             Panel::Permissions => self.draw_permissions(ui),
             Panel::History => self.draw_history(ui),
+            Panel::Stats => self.draw_stats(ui),
             Panel::About => draw_about(ui),
-            panel => draw_placeholder(ui, panel),
         });
     }
 
@@ -718,6 +725,67 @@ impl UiState {
             });
         }
     }
+
+    fn draw_stats(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Stats");
+        ui.add_space(4.0);
+        ui.label("Your usage at a glance — computed on this device, never sent anywhere.");
+        ui.add_space(8.0);
+
+        // Recompute from disk (picks up transcripts dictated since first view).
+        if ui.button("Refresh").clicked() {
+            self.stats_requested = false;
+        }
+        // Compute lazily on first view; `stats_requested` keeps it to one
+        // round-trip until the user (or a Refresh) asks again.
+        if !self.stats_requested {
+            self.stats_requested = true;
+            self.stats_status = None;
+            self.actions.push(SettingsAction::LoadStats);
+        }
+
+        draw_status(ui, &self.stats_status);
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        let stats = match &self.stats {
+            None => {
+                ui.weak("Loading…");
+                return;
+            }
+            Some(s) => s,
+        };
+        if stats.total == 0 {
+            ui.weak("No transcripts yet — hold the hotkey and speak.");
+            return;
+        }
+
+        egui::Grid::new("stats-headline")
+            .num_columns(2)
+            .spacing([24.0, 6.0])
+            .show(ui, |ui| {
+                stat_row(ui, "Transcripts", &stats.total.to_string());
+                stat_row(ui, "Words", &stats.words.to_string());
+                stat_row(ui, "Average words", &format!("{:.1} per transcript", stats.avg_words()));
+                stat_row(ui, "Last 24 hours", &stats.last_24h.to_string());
+                stat_row(ui, "Last 7 days", &stats.last_7d.to_string());
+            });
+
+        ui.add_space(14.0);
+        ui.strong("By provider");
+        ui.add_space(4.0);
+        egui::Grid::new("stats-providers")
+            .num_columns(2)
+            .spacing([24.0, 6.0])
+            .show(ui, |ui| {
+                for (id, count) in &stats.by_provider {
+                    ui.label(provider_display(id));
+                    ui.label(count.to_string());
+                    ui.end_row();
+                }
+            });
+    }
 }
 
 /// Display name for a stored provider id, falling back to the raw value for
@@ -851,13 +919,11 @@ fn draw_status(ui: &mut egui::Ui, status: &Option<(bool, String)>) {
     }
 }
 
-/// Placeholder panel body — replaced section by section in P3–P6.
-fn draw_placeholder(ui: &mut egui::Ui, panel: Panel) {
-    ui.heading(panel.label());
-    ui.add_space(4.0);
-    ui.label(panel.blurb());
-    ui.add_space(12.0);
-    ui.weak("Coming soon.");
+/// One label/value line in a stats grid (value emphasised).
+fn stat_row(ui: &mut egui::Ui, label: &str, value: &str) {
+    ui.label(label);
+    ui.strong(value);
+    ui.end_row();
 }
 
 /// About — already real: name, version, licence. Cheap and final.
