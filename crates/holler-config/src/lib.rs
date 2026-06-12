@@ -30,6 +30,10 @@ pub struct Config {
     /// Whether to trim leading/trailing silence via WebRTC VAD before STT.
     #[serde(default = "default_true")]
     pub vad: bool,
+    /// Show an on-screen "Copied to clipboard — paste it" toast when auto-paste
+    /// can't run (Accessibility not granted, or injection failed). Default on.
+    #[serde(default = "default_true")]
+    pub clipboard_toast: bool,
 }
 
 fn default_true() -> bool {
@@ -44,6 +48,7 @@ impl Default for Config {
             stt_model: String::new(),
             injection_mode: "paste".to_string(),
             vad: true,
+            clipboard_toast: true,
         }
     }
 }
@@ -122,6 +127,15 @@ mod tests {
         assert_eq!(c.stt_provider, "deepgram");
         assert_eq!(c.injection_mode, "paste");
         assert_eq!(c.model_override(), None);
+        assert!(c.vad);
+        assert!(c.clipboard_toast);
+    }
+
+    #[test]
+    fn clipboard_toast_defaults_on_when_absent() {
+        // An older config file with no clipboard_toast key must opt in by default.
+        let back: Config = toml::from_str("stt_provider = \"openai\"\n").unwrap();
+        assert!(back.clipboard_toast);
     }
 
     #[test]
