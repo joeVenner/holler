@@ -509,7 +509,15 @@ impl App {
         // Whether auto-paste/auto-type couldn't run and the text is left on the
         // clipboard for a manual paste — drives the fallback toast below.
         let mut fell_back = false;
-        if mode == InjectMode::Paste && !self.accessibility_ok {
+        if permissions::secure_keyboard_entry_enabled() {
+            // Secure Keyboard Entry (a frontmost Terminal/iTerm with the option
+            // on, or a password field) blocks synthetic events — both the paste
+            // chord and typed keystrokes are silently swallowed. Leave the text
+            // on the clipboard and surface the toast instead of firing into the
+            // void; this is the "pastes everywhere but the terminal" case.
+            fell_back = true;
+            println!("[holler] injection skipped — Secure Keyboard Entry is active (frontmost app, e.g. Terminal/iTerm). Text is on the clipboard; paste manually or turn off Secure Keyboard Entry.");
+        } else if mode == InjectMode::Paste && !self.accessibility_ok {
             // Text is already on clipboard — silent fallback, no error spam.
             fell_back = true;
             if !self.accessibility_warned {

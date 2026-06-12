@@ -5,6 +5,11 @@ fn main() {
     // unless we link the framework explicitly. macOS-only; a no-op elsewhere.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         println!("cargo:rustc-link-lib=framework=AVFoundation");
+        // Carbon provides `IsSecureEventInputEnabled` (permissions.rs), used to
+        // detect when the focused app (Terminal/iTerm "Secure Keyboard Entry",
+        // password fields) is blocking synthetic events so auto-paste would be
+        // silently swallowed. Deprecated umbrella, but the symbol is still live.
+        println!("cargo:rustc-link-lib=framework=Carbon");
     }
     // Windows: embed the .exe icon + version resource so Explorer, the taskbar
     // and file properties show Holler's branding. Gated to a Windows host — the
