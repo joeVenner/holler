@@ -26,3 +26,6 @@ models/
 # Personal project planning — stays local, never pushed (Yassir, 2026-06-10)
 /docs/
 /CLAUDE.md
+
+# Regenerable icon intermediate (the .icns is the committed deliverable)
+assets/Holler.iconset/

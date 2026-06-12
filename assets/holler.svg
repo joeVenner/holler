@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Holler app icon — master art. 1024×1024.
+     A voice waveform on a charcoal squircle, in the app's own palette
+     (blue #5b8def level bars + a red #ff4646 record bar at centre), so the
+     icon reads the same as the recording overlay the user sees daily.
+     Regenerate the .icns/.ico/PNGs with scripts/gen-icons.py. -->
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#26262b"/>
+      <stop offset="1" stop-color="#161618"/>
+    </linearGradient>
+    <linearGradient id="blue" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7aa6ff"/>
+      <stop offset="1" stop-color="#5b8def"/>
+    </linearGradient>
+    <linearGradient id="red" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff6a5e"/>
+      <stop offset="1" stop-color="#ff4646"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded-square backdrop with a hairline top highlight. -->
+  <rect x="96" y="96" width="832" height="832" rx="188" fill="url(#bg)"/>
+  <rect x="96.5" y="96.5" width="831" height="831" rx="187.5"
+        fill="none" stroke="#3a3a42" stroke-width="3" opacity="0.7"/>
+
+  <!-- Voice waveform: five rounded bars, symmetric heights, centred on y=512.
+       Centre bar is the red "record" accent; the rest are the blue level. -->
+  <g>
+    <rect x="190" y="402" width="84" height="220" rx="42" fill="url(#blue)"/>
+    <rect x="330" y="322" width="84" height="380" rx="42" fill="url(#blue)"/>
+    <rect x="470" y="252" width="84" height="520" rx="42" fill="url(#red)"/>
+    <rect x="610" y="322" width="84" height="380" rx="42" fill="url(#blue)"/>
+    <rect x="750" y="402" width="84" height="220" rx="42" fill="url(#blue)"/>
+  </g>
+</svg>

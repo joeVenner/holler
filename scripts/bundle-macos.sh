@@ -50,6 +50,16 @@ rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp "$BIN_SRC" "$APP_DIR/Contents/MacOS/holler"
 
+# App icon (Finder / DMG / Get Info). Regenerate with scripts/gen-icons.py.
+ICON_SRC="$(dirname "$0")/../assets/Holler.icns"
+ICON_KEY=""
+if [[ -f "$ICON_SRC" ]]; then
+  cp "$ICON_SRC" "$APP_DIR/Contents/Resources/Holler.icns"
+  ICON_KEY=$'    <key>CFBundleIconFile</key>          <string>Holler</string>'
+else
+  echo "warning: $ICON_SRC missing — bundling without an icon" >&2
+fi
+
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -62,6 +72,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <key>CFBundleVersion</key>          <string>${VERSION}</string>
     <key>CFBundleShortVersionString</key><string>${VERSION}</string>
     <key>CFBundlePackageType</key>      <string>APPL</string>
+${ICON_KEY}
     <key>LSMinimumSystemVersion</key>   <string>11.0</string>
     <!-- Menubar agent: no Dock icon, no main window. -->
     <key>LSUIElement</key>              <true/>
