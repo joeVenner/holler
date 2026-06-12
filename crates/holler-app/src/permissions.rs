@@ -70,6 +70,59 @@ pub fn microphone_status() -> MicStatus {
     }
 }
 
+/// Proactively ask macOS for microphone access, raising the system prompt when
+/// authorization is still [`NotDetermined`]. This is **required**: Holler
+/// captures via cpal → CoreAudio's HAL, which opens an input unit without ever
+/// triggering the TCC prompt — an unauthorized app just receives a stream of
+/// silence. So unless we call `requestAccessForMediaType:` ourselves, the first
+/// (and every) recording is silent and the status stays stuck at "not requested".
+///
+/// Non-blocking: `requestAccessForMediaType:completionHandler:` returns at once
+/// and invokes the handler after the user responds. We pass a no-op handler and
+/// read the result separately via [`microphone_status`] (the settings UI and the
+/// tray already poll it), so there's nothing to await here. Call once on the main
+/// thread at startup. A no-op when access is already determined, or off macOS.
+///
+/// [`NotDetermined`]: MicStatus::NotDetermined
+pub fn request_microphone_access() {
+    #[cfg(target_os = "macos")]
+    {
+        use block2::RcBlock;
+        use objc2::msg_send;
+        use objc2::runtime::{AnyClass, Bool};
+        use objc2_foundation::NSString;
+
+        // Only prompt when the user hasn't decided yet. Re-requesting once
+        // Denied/Granted is a no-op for AVFoundation, but skipping it avoids
+        // constructing a block on every launch.
+        if microphone_status() != MicStatus::NotDetermined {
+            return;
+        }
+
+        let Some(cls) = AnyClass::get(c"AVCaptureDevice") else {
+            return;
+        };
+        let media_type = NSString::from_str("soun"); // AVMediaTypeAudio
+
+        // AVFoundation copies (Block_copy) the escaping completion handler, so
+        // it outlives this RcBlock — the no-op body just lets the prompt run;
+        // the live grant is observed later through `microphone_status()`.
+        let handler = RcBlock::new(|_granted: Bool| {});
+
+        // SAFETY: documented class method
+        // `requestAccessForMediaType:completionHandler:` — `(AVMediaType, void(^)(BOOL))`.
+        // The NSString and block are valid for the synchronous dispatch; the
+        // block is retained by AVFoundation for the async callback.
+        unsafe {
+            let _: () = msg_send![
+                cls,
+                requestAccessForMediaType: &*media_type,
+                completionHandler: &*handler,
+            ];
+        }
+    }
+}
+
 /// Open the OS panel where the user can grant Accessibility access.
 pub fn open_accessibility_settings() {
     #[cfg(target_os = "macos")]
