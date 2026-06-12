@@ -17,6 +17,34 @@ pub fn accessibility_granted() -> bool {
     }
 }
 
+/// True when **Secure Keyboard Entry** is active anywhere on the system.
+///
+/// macOS lets an app (Terminal/iTerm via their "Secure Keyboard Entry" menu
+/// item, and any password field) lock keyboard input so no other process can
+/// observe *or inject* events while that app is frontmost. Holler's auto-paste
+/// fires a synthetic Cmd+V (and Type mode synthesises keystrokes) — both are
+/// silently swallowed under secure input, which is exactly why dictation pastes
+/// fine into most apps but does nothing in a terminal that has it enabled.
+///
+/// The flag is global but effectively tracks the frontmost secure app, so it
+/// reads true at the moment we'd inject into such an app and false otherwise —
+/// good enough to decide whether to fall back to a manual-paste toast.
+pub fn secure_keyboard_entry_enabled() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            // Carbon HIToolbox: returns a `Boolean` (unsigned char). Linked via
+            // build.rs (`framework=Carbon`).
+            fn IsSecureEventInputEnabled() -> u8;
+        }
+        unsafe { IsSecureEventInputEnabled() != 0 }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
 /// Microphone privacy authorization. macOS gates microphone access per app
 /// (System Settings → Privacy & Security → Microphone). Other platforms have
 /// no equivalent per-app prompt, so the status there is always [`Granted`].
@@ -120,5 +148,7 @@ mod tests {
     fn status_queries_do_not_panic() {
         let _ = accessibility_granted();
         let _ = microphone_status();
+        // Exercises the Carbon `IsSecureEventInputEnabled` link on macOS.
+        let _ = secure_keyboard_entry_enabled();
     }
 }
