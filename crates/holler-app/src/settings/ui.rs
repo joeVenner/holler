@@ -52,6 +52,12 @@ pub enum SettingsAction {
     /// Compute (or recompute) the usage statistics from the history DB.
     /// `App` replies via `SettingsWindow::stats_loaded`.
     LoadStats,
+    /// Speak a history entry's text aloud via the OS TTS engine. Starting a new
+    /// utterance cancels any in-progress one. `App` replies via
+    /// `SettingsWindow::history_action_feedback`.
+    SpeakHistory { text: String },
+    /// Stop any in-progress read-aloud.
+    StopSpeaking,
 }
 
 /// Everything the Providers panel needs to render one provider row. Adding a
@@ -682,12 +688,14 @@ impl UiState {
         let mut to_copy: Option<String> = None;
         let mut to_delete: Option<i64> = None;
         let mut set_confirm: Option<Option<i64>> = None;
+        let mut to_speak: Option<String> = None;
+        let mut stop_speaking = false;
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for entry in &self.history_entries {
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                    let row = egui::Frame::group(ui.style()).show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.strong(provider_display(&entry.provider));
                             ui.weak("·");
@@ -725,6 +733,18 @@ impl UiState {
                         // Wrap long transcripts rather than stretching the row.
                         ui.add(egui::Label::new(&entry.text).wrap());
                     });
+                    // Right-click the row → read it aloud / stop. egui paints its
+                    // own popup (identical on macOS and Windows — no native menu).
+                    row.response.context_menu(|ui| {
+                        if ui.button("🔊  Read aloud").clicked() {
+                            to_speak = Some(entry.text.clone());
+                            ui.close();
+                        }
+                        if ui.button("■  Stop").clicked() {
+                            stop_speaking = true;
+                            ui.close();
+                        }
+                    });
                     ui.add_space(6.0);
                 }
             });
@@ -742,6 +762,13 @@ impl UiState {
                 id,
                 query: self.history_query.clone(),
             });
+        }
+        if let Some(text) = to_speak {
+            self.history_status = None;
+            self.actions.push(SettingsAction::SpeakHistory { text });
+        }
+        if stop_speaking {
+            self.actions.push(SettingsAction::StopSpeaking);
         }
     }
 
