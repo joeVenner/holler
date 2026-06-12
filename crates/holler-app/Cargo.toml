@@ -39,3 +39,8 @@ glutin-winit = "0.5.0"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = "0.3"
+
+# Windows-only: embed the .exe icon + version resource at build time (build.rs).
+# Gated to a Windows host, so it's never fetched/compiled on macOS/Linux builds.
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
