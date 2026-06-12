@@ -154,6 +154,10 @@ struct App {
     overlay: Option<Overlay>,
     /// "Copied to clipboard — paste it" toast, shown when auto-paste can't run.
     toast: Option<Toast>,
+    /// OS text-to-speech engine for the History "Read aloud" action. Lazily
+    /// constructed on first use (nothing on the launch path); kept alive after
+    /// because the engine speaks asynchronously and dropping it cuts the audio.
+    tts: Option<tts::Tts>,
     /// When the toast should auto-dismiss; drives a `WaitUntil` wake like the
     /// settings repaint. `None` when no toast is showing.
     toast_hide_at: Option<Instant>,
@@ -212,6 +216,7 @@ impl App {
             accessibility_warned: false,
             overlay: None,
             toast: None,
+            tts: None,
             toast_hide_at: None,
             settings: None,
             settings_repaint_at: None,
@@ -821,6 +826,44 @@ impl App {
                         sw.stats_loaded(res);
                     }
                 }
+                SettingsAction::SpeakHistory { text } => {
+                    let res = self.speak(&text);
+                    if let Err(e) = &res {
+                        eprintln!("[holler] read-aloud failed: {e}");
+                    }
+                    if let Some(sw) = &mut self.settings {
+                        sw.history_action_feedback(res.map(|()| "Reading aloud… ✓".to_string()));
+                    }
+                }
+                SettingsAction::StopSpeaking => {
+                    self.stop_speaking();
+                    if let Some(sw) = &mut self.settings {
+                        sw.history_action_feedback(Ok("Stopped".to_string()));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Speak `text` via the OS TTS engine, cancelling any in-progress utterance
+    /// (`interrupt = true`). The engine is built on first use — nothing touches
+    /// the launch path — and speaks asynchronously on its own thread, so this
+    /// never blocks the UI or the PTT/tray loop. Cross-platform via the `tts`
+    /// crate (AVFoundation on macOS, SAPI/WinRT on Windows) — see DISCOVERIES.
+    fn speak(&mut self, text: &str) -> Result<(), String> {
+        if self.tts.is_none() {
+            self.tts = Some(tts::Tts::default().map_err(|e| e.to_string())?);
+        }
+        let engine = self.tts.as_mut().expect("tts just initialised");
+        engine.speak(text, true).map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    /// Halt any in-progress read-aloud. No-op if nothing is speaking / the
+    /// engine was never built.
+    fn stop_speaking(&mut self) {
+        if let Some(engine) = &mut self.tts {
+            if let Err(e) = engine.stop() {
+                eprintln!("[holler] stop read-aloud failed: {e}");
             }
         }
     }
