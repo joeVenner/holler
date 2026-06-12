@@ -97,9 +97,26 @@ if [[ -n "${SIGN_IDENTITY:-}" ]]; then
   codesign --force --options runtime --timestamp \
     --sign "$SIGN_IDENTITY" "$APP_DIR"
 else
-  echo "==> Ad-hoc code signing (no SIGN_IDENTITY — Gatekeeper will warn on other Macs)"
-  codesign --force --sign - --timestamp=none "$APP_DIR/Contents/MacOS/holler"
-  codesign --force --sign - --timestamp=none "$APP_DIR"
+  # No Developer ID. Prefer a STABLE self-signed identity (from
+  # scripts/ensure-dev-signing-identity.sh) so the Accessibility/Microphone TCC
+  # grant survives rebuilds; fall back to ad-hoc (grant breaks on every rebuild).
+  # No `-v`: the self-signed cert is untrusted (CSSMERR_TP_NOT_TRUSTED), which
+  # valid-only filtering would hide. Sign by the SHA-1 hash, not the name —
+  # duplicate-named identities make a name-based --sign ambiguous and fail.
+  LOCAL_ID="$(security find-identity -p codesigning 2>/dev/null \
+    | grep 'Holler Dev Self-Signed' | head -1 \
+    | sed -E 's/^[[:space:]]*[0-9]+\) ([0-9A-Fa-f]+) .*/\1/')"
+  if [[ -n "$LOCAL_ID" ]]; then
+    echo "==> Stable self-signed identity ($LOCAL_ID) — TCC grant survives rebuilds"
+    codesign --force --sign "$LOCAL_ID" --timestamp=none "$APP_DIR/Contents/MacOS/holler"
+    codesign --force --sign "$LOCAL_ID" --timestamp=none "$APP_DIR"
+  else
+    echo "==> Ad-hoc code signing (no SIGN_IDENTITY — Gatekeeper will warn on other Macs)"
+    echo "    Tip: run scripts/ensure-dev-signing-identity.sh once so the"
+    echo "    Accessibility grant stops resetting on every rebuild."
+    codesign --force --sign - --timestamp=none "$APP_DIR/Contents/MacOS/holler"
+    codesign --force --sign - --timestamp=none "$APP_DIR"
+  fi
 fi
 codesign --verify --verbose "$APP_DIR"
 
