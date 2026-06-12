@@ -21,7 +21,11 @@ const ERR_RED: egui::Color32 = egui::Color32::from_rgb(230, 110, 100);
 /// One user-confirmed edit, applied by `App` after the frame.
 pub enum SettingsAction {
     /// Persist the General panel fields (merged into the app config).
-    SaveGeneral { injection_mode: String, vad: bool },
+    SaveGeneral {
+        injection_mode: String,
+        vad: bool,
+        clipboard_toast: bool,
+    },
     /// Re-register the global PTT hotkey to this combo (e.g. "ctrl+alt+space")
     /// and persist it. The combo has already passed `try_parse_ptt_key` once
     /// in the UI, but `App` validates again — it owns the truth.
@@ -152,6 +156,8 @@ pub(super) struct UiState {
     vad_draft: bool,
     injection_saved: String,
     vad_saved: bool,
+    toast_draft: bool,
+    toast_saved: bool,
     general_status: Option<(bool, String)>,
     // Hotkey.
     ptt_label: String,
@@ -204,6 +210,8 @@ impl UiState {
             vad_draft: config.vad,
             injection_saved: config.injection_mode.clone(),
             vad_saved: config.vad,
+            toast_draft: config.clipboard_toast,
+            toast_saved: config.clipboard_toast,
             general_status: None,
             ptt_label: ptt_label.to_string(),
             capturing: false,
@@ -244,6 +252,7 @@ impl UiState {
             Ok(()) => {
                 self.injection_saved = self.injection_draft.clone();
                 self.vad_saved = self.vad_draft;
+                self.toast_saved = self.toast_draft;
                 (true, "Saved ✓".to_string())
             }
             Err(e) => (false, e),
@@ -359,10 +368,18 @@ impl UiState {
             &mut self.vad_draft,
             "Trim leading/trailing silence before transcription (VAD)",
         );
+        ui.add_space(8.0);
+
+        ui.checkbox(
+            &mut self.toast_draft,
+            "Show a \"copied to clipboard\" notification when auto-paste can't run",
+        );
+        ui.weak("Appears (without stealing focus) when Accessibility isn't granted or injection fails — the transcript is on your clipboard, ready to paste.");
         ui.add_space(12.0);
 
-        let dirty =
-            self.injection_draft != self.injection_saved || self.vad_draft != self.vad_saved;
+        let dirty = self.injection_draft != self.injection_saved
+            || self.vad_draft != self.vad_saved
+            || self.toast_draft != self.toast_saved;
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(dirty, egui::Button::new("Save"))
@@ -372,6 +389,7 @@ impl UiState {
                 self.actions.push(SettingsAction::SaveGeneral {
                     injection_mode: self.injection_draft.clone(),
                     vad: self.vad_draft,
+                    clipboard_toast: self.toast_draft,
                 });
             }
             if ui
@@ -380,6 +398,7 @@ impl UiState {
             {
                 self.injection_draft = self.injection_saved.clone();
                 self.vad_draft = self.vad_saved;
+                self.toast_draft = self.toast_saved;
                 self.general_status = None;
             }
         });
