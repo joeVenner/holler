@@ -58,10 +58,7 @@ jobs:
       - name: Create DMG
         run: |
           ARCH=${{ matrix.target }}
-          hdiutil create -volname Holler \
-            -srcfolder Holler-$ARCH.app \
-            -ov -format UDZO \
-            Holler-$ARCH.dmg
+          bash scripts/make-dmg.sh Holler-$ARCH.app Holler-$ARCH.dmg Holler
 
       - name: Upload DMG
         uses: actions/upload-artifact@v4
@@ -141,11 +138,7 @@ jobs:
           bash scripts/bundle-macos.sh
 
       - name: Create universal DMG
-        run: |
-          hdiutil create -volname Holler \
-            -srcfolder Holler.app \
-            -ov -format UDZO \
-            Holler-macOS-universal.dmg
+        run: bash scripts/make-dmg.sh Holler.app Holler-macOS-universal.dmg Holler
 
       # Notarize the DMG with Apple and staple the ticket so it installs without
       # a Gatekeeper warning, even offline. Skipped until secrets are configured.
