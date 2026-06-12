@@ -34,7 +34,8 @@ pub enum Phase {
 }
 
 /// An RGB colour, kept as components so we can alpha-composite with coverage.
-type Rgb = (u8, u8, u8);
+/// Shared with the toast renderer (`toast.rs`), which reuses the paint helpers.
+pub(crate) type Rgb = (u8, u8, u8);
 
 const BG: Rgb = (18, 18, 20); // window backdrop / pill corners (near-black)
 const PILL: Rgb = (34, 34, 39); // the rounded card
@@ -285,7 +286,7 @@ fn draw_dot(buf: &mut [u32], cx: f32, cy: f32, r: f32, col: Rgb) {
 
 /// Signed distance from a point to a rounded rectangle centred at the origin
 /// (negative inside). Standard rounded-box SDF.
-fn sd_round_rect(px: f32, py: f32, half_w: f32, half_h: f32, r: f32) -> f32 {
+pub(crate) fn sd_round_rect(px: f32, py: f32, half_w: f32, half_h: f32, r: f32) -> f32 {
     let qx = px.abs() - (half_w - r);
     let qy = py.abs() - (half_h - r);
     let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
@@ -299,7 +300,7 @@ fn pulse(frame: usize) -> f32 {
 }
 
 /// Pack an RGB triple into softbuffer's native XRGB word.
-fn pack((r, g, b): Rgb) -> u32 {
+pub(crate) fn pack((r, g, b): Rgb) -> u32 {
     ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
 }
 
@@ -311,7 +312,7 @@ fn lerp_rgb(a: Rgb, b: Rgb, t: f32) -> Rgb {
 }
 
 /// Alpha-composite `col` over the pixel at `idx` with coverage `a` in `[0, 1]`.
-fn blend(buf: &mut [u32], idx: usize, col: Rgb, a: f32) {
+pub(crate) fn blend(buf: &mut [u32], idx: usize, col: Rgb, a: f32) {
     let a = a.clamp(0.0, 1.0);
     let dst = buf[idx];
     let dr = ((dst >> 16) & 0xFF) as f32;

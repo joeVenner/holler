@@ -25,6 +25,7 @@ mod icons;
 mod overlay;
 mod permissions;
 mod settings;
+mod toast;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -50,6 +51,7 @@ use winit::{
 };
 use overlay::Overlay;
 use settings::{SettingsAction, SettingsWindow};
+use toast::Toast;
 
 /// How often the tray animation advances a frame.
 const FRAME_INTERVAL: Duration = Duration::from_millis(90);
@@ -150,6 +152,11 @@ struct App {
     last_ax_check: Instant,
     /// Desktop recording indicator shown during PTT hold.
     overlay: Option<Overlay>,
+    /// "Copied to clipboard — paste it" toast, shown when auto-paste can't run.
+    toast: Option<Toast>,
+    /// When the toast should auto-dismiss; drives a `WaitUntil` wake like the
+    /// settings repaint. `None` when no toast is showing.
+    toast_hide_at: Option<Instant>,
     /// The egui settings window — exists only while open (PLAN.md §6).
     settings: Option<SettingsWindow>,
     /// When egui asked to be repainted (cursor blink, animations). Drives a
@@ -204,6 +211,8 @@ impl App {
             accessibility_ok,
             accessibility_warned: false,
             overlay: None,
+            toast: None,
+            toast_hide_at: None,
             settings: None,
             settings_repaint_at: None,
             settings_item_id: None,
@@ -327,6 +336,11 @@ impl App {
         self.overlay = Overlay::create(event_loop);
         if self.overlay.is_none() {
             eprintln!("[holler] overlay window unavailable (non-fatal)");
+        }
+        // Clipboard-fallback toast — created hidden, shown on demand from deliver().
+        self.toast = Toast::create(event_loop);
+        if self.toast.is_none() {
+            eprintln!("[holler] toast window unavailable (non-fatal)");
         }
 
         println!("[holler] ready — hold {ptt_label} to talk; tray menu → Quit to exit.");
@@ -482,8 +496,12 @@ impl App {
         // Re-check Accessibility in case the user granted it while running.
         self.accessibility_ok = permissions::accessibility_granted();
 
+        // Whether auto-paste/auto-type couldn't run and the text is left on the
+        // clipboard for a manual paste — drives the fallback toast below.
+        let mut fell_back = false;
         if mode == InjectMode::Paste && !self.accessibility_ok {
             // Text is already on clipboard — silent fallback, no error spam.
+            fell_back = true;
             if !self.accessibility_warned {
                 self.accessibility_warned = true;
                 println!("[holler] auto-paste skipped — Accessibility not granted. Text is on clipboard; use tray menu → Grant Accessibility Access…");
@@ -504,9 +522,11 @@ impl App {
                 Some(injector) => {
                     if let Err(e) = injector.deliver(&t.text, mode) {
                         eprintln!("[holler] injection failed: {e} (text is on clipboard — paste manually)");
+                        fell_back = true;
                     }
                 }
                 None => {
+                    fell_back = true;
                     if !self.accessibility_warned {
                         self.accessibility_warned = true;
                         eprintln!("[holler] injector unavailable — text is on clipboard");
@@ -515,7 +535,25 @@ impl App {
             }
         }
 
+        if fell_back {
+            self.show_clipboard_toast();
+        }
         self.set_tray_state(TrayState::Idle);
+    }
+
+    /// Show the "copied to clipboard — paste it" toast (when enabled in config)
+    /// and arm its auto-dismiss timer. Called from `deliver` whenever auto-paste
+    /// or auto-type couldn't run, so the user knows the transcript is waiting on
+    /// the clipboard. The toast window is non-activating — it never steals the
+    /// focus from the app the user is about to paste into.
+    fn show_clipboard_toast(&mut self) {
+        if !self.config.clipboard_toast {
+            return;
+        }
+        if let Some(toast) = &mut self.toast {
+            toast.show_message("COPIED TO CLIPBOARD — PASTE IT");
+            self.toast_hide_at = Some(Instant::now() + Duration::from_secs(toast::VISIBLE_SECS));
+        }
     }
 
     /// Switch the tray to a new state, resetting the animation and redrawing.
@@ -675,9 +713,11 @@ impl App {
                 SettingsAction::SaveGeneral {
                     injection_mode,
                     vad,
+                    clipboard_toast,
                 } => {
                     self.config.injection_mode = injection_mode;
                     self.config.vad = vad;
+                    self.config.clipboard_toast = clipboard_toast;
                     let res = holler_config::save(&self.config).map_err(|e| e.to_string());
                     match &res {
                         Ok(()) => println!("[holler] config saved (general)"),
@@ -881,6 +921,15 @@ impl ApplicationHandler<UserEvent> for App {
                 sw.request_redraw();
             }
         }
+        // The clipboard toast's dwell time has elapsed — dismiss it.
+        if let Some(at) = self.toast_hide_at {
+            if Instant::now() >= at {
+                self.toast_hide_at = None;
+                if let Some(toast) = &self.toast {
+                    toast.hide();
+                }
+            }
+        }
         // Re-check permissions on every loop wake, rate-limited. Guarded by
         // hotkeys.is_some() so we don't poll before init() has run.
         if self.hotkeys.is_some()
@@ -900,6 +949,10 @@ impl ApplicationHandler<UserEvent> for App {
         }
         if let Some(at) = self.settings_repaint_at {
             // egui asked for a deferred repaint of the settings window.
+            wake = Some(wake.map_or(at, |w| w.min(at)));
+        }
+        if let Some(at) = self.toast_hide_at {
+            // Wake to auto-dismiss the clipboard toast.
             wake = Some(wake.map_or(at, |w| w.min(at)));
         }
         if cfg!(target_os = "macos") && self.hotkeys.is_some() {
