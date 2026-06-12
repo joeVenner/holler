@@ -31,6 +31,11 @@ use rubato::{
 /// The sample rate Whisper is trained on.
 const TARGET_RATE: usize = 16_000;
 
+/// Maps speech RMS (typically ~0.02–0.2 on normalised samples) onto the meter's
+/// `[0, 1]` range so ordinary talking fills most of the bar. Tuned by eye — the
+/// overlay clamps, so a loud burst just pins at full rather than overflowing.
+const LEVEL_GAIN: f32 = 6.0;
+
 /// Errors surfaced by the capture pipeline. Kept dependency-free (no
 /// `thiserror`) — the variants carry a rendered message from the underlying
 /// cpal/rubato error so callers can log without matching on foreign types.
@@ -130,6 +135,21 @@ impl AudioCapture {
         })
     }
 
+    /// An instantaneous input level in `[0, 1]` for a live meter, computed from
+    /// the most recent ~100 ms of captured samples. Non-destructive and uses
+    /// `try_lock` so polling it from the UI never blocks (or is blocked by) the
+    /// realtime audio thread — a missed read just reuses the previous frame.
+    pub fn level(&self) -> f32 {
+        let Ok(buf) = self.buffer.try_lock() else {
+            return 0.0;
+        };
+        // ~100 ms window across all interleaved channels (RMS is fine over the
+        // interleave for a level meter — we're not separating channels).
+        let window = (self.sample_rate as usize / 10).max(1) * self.channels.max(1) as usize;
+        let start = buf.len().saturating_sub(window);
+        rms_level(&buf[start..], LEVEL_GAIN)
+    }
+
     /// Stop capturing and return the clip as 16 kHz mono f32.
     pub fn stop(self) -> Result<Recording, AudioError> {
         let Self {
@@ -181,6 +201,18 @@ where
         |err| eprintln!("[holler-audio] stream error: {err}"),
         None,
     )
+}
+
+/// Root-mean-square amplitude of `samples`, scaled by `gain` and clamped to
+/// `[0, 1]`. Empty input reads as silence. Pulled out of [`AudioCapture::level`]
+/// so the level maths is unit-testable without a real input device.
+fn rms_level(samples: &[f32], gain: f32) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
+    let rms = (sum_sq / samples.len() as f32).sqrt();
+    (rms * gain).clamp(0.0, 1.0)
 }
 
 /// Average interleaved channels down to a single mono track. (Done before
@@ -319,6 +351,21 @@ pub fn vad_trim(samples: &[f32]) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rms_level_silence_is_zero_and_loud_clamps_to_one() {
+        assert_eq!(rms_level(&[], 6.0), 0.0);
+        assert_eq!(rms_level(&[0.0, 0.0, 0.0], 6.0), 0.0);
+        // A full-scale square wave has RMS 1.0; any positive gain pins it at 1.
+        assert_eq!(rms_level(&[1.0, -1.0, 1.0, -1.0], 6.0), 1.0);
+    }
+
+    #[test]
+    fn rms_level_scales_quiet_speech_by_gain() {
+        // RMS of a constant 0.1 signal is 0.1; ×6 gain → 0.6, still under the clamp.
+        let samples = [0.1_f32; 100];
+        assert!((rms_level(&samples, 6.0) - 0.6).abs() < 1e-6);
+    }
 
     #[test]
     fn downmix_stereo_averages_channels() {
