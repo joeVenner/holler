@@ -574,7 +574,7 @@ impl UiState {
             match self.mic_status {
                 MicStatus::Granted => perm_line(ui, true, "Granted — Holler can hear you."),
                 MicStatus::NotDetermined => {
-                    ui.label("Not requested yet — macOS will ask the first time you record.");
+                    ui.label("Waiting for your response to the macOS microphone prompt.");
                 }
                 MicStatus::Denied => {
                     perm_line(ui, false, "Denied — recordings will be silent.");

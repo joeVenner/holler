@@ -1670,6 +1670,7 @@ name = "holler-app"
 version = "0.2.0"
 dependencies = [
  "arboard",
+ "block2 0.6.2",
  "egui",
  "egui_glow",
  "global-hotkey",

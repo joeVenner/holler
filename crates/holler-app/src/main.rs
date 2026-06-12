@@ -187,6 +187,11 @@ impl App {
             println!("[holler] Accessibility not granted — auto-paste disabled. Grant via tray menu.");
         }
 
+        // Raise the microphone prompt now (main thread) if undecided. cpal's
+        // CoreAudio capture never triggers it, so without this the first
+        // recording would be silent and the grant would never be requested.
+        permissions::request_microphone_access();
+
         Self {
             proxy,
             hotkeys: None,
