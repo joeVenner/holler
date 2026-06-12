@@ -28,7 +28,7 @@ mod settings;
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arboard::Clipboard;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
@@ -762,7 +762,27 @@ impl App {
                         );
                     }
                 }
+                SettingsAction::LoadStats => {
+                    let res = self.load_stats();
+                    if let Some(sw) = &mut self.settings {
+                        sw.stats_loaded(res);
+                    }
+                }
             }
+        }
+    }
+
+    /// Compute usage statistics for the Settings → Stats panel. Like the
+    /// history queries, this runs on the main thread — a single scan of a
+    /// local SQLite table is sub-millisecond.
+    fn load_stats(&self) -> Result<holler_store::Stats, String> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        match &self.history {
+            Some(h) => h.stats(now).map_err(|e| e.to_string()),
+            None => Err("history database unavailable".to_string()),
         }
     }
 
