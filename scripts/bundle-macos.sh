@@ -89,12 +89,16 @@ PLIST
 ENTITLEMENTS="$(dirname "$0")/holler.entitlements"
 if [[ -n "${SIGN_IDENTITY:-}" ]]; then
   echo "==> Developer ID signing + hardened runtime ($SIGN_IDENTITY)"
-  # Entitlements + hardened runtime go on the executable; the bundle wrapper is
-  # then sealed over it. A secure --timestamp is required for notarization.
+  # Sign the bundle exactly ONCE: codesign applies the entitlements + hardened
+  # runtime to the main executable and seals the wrapper in a single pass. A
+  # second `--force` sign on the wrapper re-signs the inner executable WITHOUT
+  # `--entitlements`, silently stripping com.apple.security.device.audio-input —
+  # which on a hardened-runtime build makes cpal capture return pure silence
+  # (mic appears granted, recording starts, no audio). This is a flat bundle
+  # (no nested frameworks/helpers), so there's no inside-out order to respect.
+  # A secure --timestamp is required for notarization.
   codesign --force --options runtime --timestamp \
     --entitlements "$ENTITLEMENTS" \
-    --sign "$SIGN_IDENTITY" "$APP_DIR/Contents/MacOS/holler"
-  codesign --force --options runtime --timestamp \
     --sign "$SIGN_IDENTITY" "$APP_DIR"
 else
   # No Developer ID. Prefer a STABLE self-signed identity (from
