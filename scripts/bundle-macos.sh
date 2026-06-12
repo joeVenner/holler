@@ -103,9 +103,12 @@ else
   # No `-v`: the self-signed cert is untrusted (CSSMERR_TP_NOT_TRUSTED), which
   # valid-only filtering would hide. Sign by the SHA-1 hash, not the name —
   # duplicate-named identities make a name-based --sign ambiguous and fail.
+  # Trailing `|| true`: with no matching identity (e.g. CI) `grep` exits 1, and
+  # under `set -o pipefail` that would abort the whole script at this command
+  # substitution — we want an empty LOCAL_ID and the ad-hoc fallback instead.
   LOCAL_ID="$(security find-identity -p codesigning 2>/dev/null \
     | grep 'Holler Dev Self-Signed' | head -1 \
-    | sed -E 's/^[[:space:]]*[0-9]+\) ([0-9A-Fa-f]+) .*/\1/')"
+    | sed -E 's/^[[:space:]]*[0-9]+\) ([0-9A-Fa-f]+) .*/\1/' || true)"
   if [[ -n "$LOCAL_ID" ]]; then
     echo "==> Stable self-signed identity ($LOCAL_ID) — TCC grant survives rebuilds"
     codesign --force --sign "$LOCAL_ID" --timestamp=none "$APP_DIR/Contents/MacOS/holler"
