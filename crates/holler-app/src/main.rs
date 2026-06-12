@@ -344,14 +344,8 @@ impl App {
                     match AudioCapture::start() {
                         Ok(capture) => {
                             self.capture = Some(capture);
-                            self.set_tray_state(TrayState::Recording);
                             self.reset_tray_tooltip(); // clear any prior error hint
-                            // Pre-render frame 0 before showing so the window
-                            // has content the moment it becomes visible.
-                            if let Some(ov) = &mut self.overlay {
-                                ov.render(0);
-                                ov.show();
-                            }
+                            self.set_tray_state(TrayState::Recording); // also shows the overlay
                             println!("[holler] PTT DOWN — recording…");
                         }
                         Err(e) => {
@@ -370,7 +364,8 @@ impl App {
                     match self.capture.take() {
                         Some(capture) => match capture.stop() {
                             Ok(rec) => {
-                                if let Some(ov) = &self.overlay { ov.hide(); }
+                                // Overlay visibility is owned by set_tray_state:
+                                // it stays up through Processing and hides on Idle.
                                 let rec = self.maybe_vad_trim(rec);
                                 // Ignore accidental taps / silence: a clip too
                                 // short to hold speech would only waste an API
@@ -528,6 +523,24 @@ impl App {
         self.tray_state = state;
         self.anim_frame = 0;
         self.render_tray();
+        // One place owns overlay visibility (avoids show/hide scattered across
+        // the PTT handlers): it's up — with the matching animation — while
+        // Recording or Processing, and hidden when Idle. Render a first frame
+        // before showing so it appears with content, not an empty flash.
+        let level = self.capture.as_ref().map_or(0.0, |c| c.level());
+        if let Some(ov) = &mut self.overlay {
+            match state {
+                TrayState::Recording => {
+                    ov.render(overlay::Phase::Recording, 0, level);
+                    ov.show();
+                }
+                TrayState::Processing => {
+                    ov.render(overlay::Phase::Processing, 0, 0.0);
+                    ov.show();
+                }
+                TrayState::Idle => ov.hide(),
+            }
+        }
     }
 
     /// Draw the current state/frame into the tray icon.
@@ -847,9 +860,17 @@ impl ApplicationHandler<UserEvent> for App {
         {
             self.anim_frame = (self.anim_frame + 1) % icons::FRAMES;
             self.render_tray();
-            if self.tray_state == TrayState::Recording {
+            // Drive the overlay animation while it's visible: a live mic level
+            // when recording, an indeterminate sweep while transcribing.
+            let phase = match self.tray_state {
+                TrayState::Recording => Some(overlay::Phase::Recording),
+                TrayState::Processing => Some(overlay::Phase::Processing),
+                TrayState::Idle => None,
+            };
+            if let Some(phase) = phase {
+                let level = self.capture.as_ref().map_or(0.0, |c| c.level());
                 if let Some(ov) = &mut self.overlay {
-                    ov.render(self.anim_frame);
+                    ov.render(phase, self.anim_frame, level);
                 }
             }
         }

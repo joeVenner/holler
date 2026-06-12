@@ -1,9 +1,16 @@
-//! Floating recording indicator — a borderless, always-on-top window shown
-//! at the bottom-centre of the primary monitor while PTT is held.
+//! Floating recording indicator — a borderless, always-on-top window shown at
+//! the bottom-centre of the primary monitor while a dictation is in progress.
 //!
-//! Rendering is done with `softbuffer` (CPU pixels, no GPU required). The
-//! animation matches the tray icon: a pulsing red dot on a dark pill.
+//! Rendering is `softbuffer` (CPU pixels, no GPU context): the overlay is a
+//! tiny, purely-ornamental, non-activating window, so a second GL/egui stack
+//! would cost idle GPU memory and main-thread contention for no benefit — see
+//! docs/DISCOVERIES.md (2026-06-12). The look is a modern dark pill with an
+//! anti-aliased outline (signed-distance coverage), a pulsing record dot, and a
+//! live, scrolling level meter fed by the real microphone amplitude
+//! (`AudioCapture::level`). During transcription the meter is replaced by an
+//! indeterminate sweep so the two phases read differently at a glance.
 
+use std::collections::VecDeque;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
@@ -17,27 +24,54 @@ use winit::{
 pub const WIDTH: u32 = 340;
 pub const HEIGHT: u32 = 72;
 
-/// BGRA colour helpers (softbuffer uses native-endian XRGB on all platforms).
-const fn xrgb(r: u8, g: u8, b: u8) -> u32 {
-    ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+/// Which phase of a dictation the overlay is depicting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// Mic is open; show the live level meter.
+    Recording,
+    /// Audio captured, transcription in flight; show an indeterminate sweep.
+    Processing,
 }
 
-const BG: u32 = xrgb(28, 28, 30);       // near-black charcoal
-const REC_ON: u32 = xrgb(255, 59, 48);  // Apple red
-const REC_DIM: u32 = xrgb(120, 20, 15); // dim red for pulse contrast
-const TEXT_GREY: u32 = xrgb(180, 180, 185);
+/// An RGB colour, kept as components so we can alpha-composite with coverage.
+type Rgb = (u8, u8, u8);
 
-/// Owns the overlay window and its softbuffer surface.
+const BG: Rgb = (18, 18, 20); // window backdrop / pill corners (near-black)
+const PILL: Rgb = (34, 34, 39); // the rounded card
+const RING: Rgb = (66, 66, 74); // its subtle outline
+const REC: Rgb = (255, 69, 58); // Apple red, recording dot
+const REC_DIM: Rgb = (140, 38, 32);
+const WAVE_HI: Rgb = (96, 174, 255); // loud sample
+const WAVE_LO: Rgb = (74, 96, 128); // quiet sample
+const PROC: Rgb = (255, 179, 64); // amber dot while transcribing
+const PROC_SWEEP: Rgb = (150, 188, 235);
+
+/// Geometry shared by the dot and meter (logical px, origin top-left).
+const DOT_CX: f32 = 30.0;
+const METER_X0: f32 = 56.0;
+const METER_X1: f32 = WIDTH as f32 - 18.0;
+const BAR_W: f32 = 3.0;
+const BAR_GAP: f32 = 2.0;
+/// One history sample per visible bar; older samples scroll off the left.
+const NUM_BARS: usize = ((METER_X1 - METER_X0) / (BAR_W + BAR_GAP)) as usize;
+
+/// Owns the overlay window, its softbuffer surface, and the rolling level
+/// history that drives the scrolling meter.
 pub struct Overlay {
     window: Arc<Window>,
     _ctx: Context<Arc<Window>>,
     surface: Surface<Arc<Window>, Arc<Window>>,
+    /// Recent levels in `[0, 1]`, newest at the back; one per rendered frame.
+    levels: VecDeque<f32>,
+    /// Exponentially-smoothed level so the meter glides instead of jittering.
+    level_smooth: f32,
 }
 
 impl Overlay {
     /// Create the overlay window. Hidden by default — call `show()` to reveal it.
     pub fn create(event_loop: &ActiveEventLoop) -> Option<Self> {
-        let monitor = event_loop.primary_monitor()
+        let monitor = event_loop
+            .primary_monitor()
             .or_else(|| event_loop.available_monitors().next())?;
 
         // Anchor to the monitor's own desktop-space origin (not an assumed
@@ -78,7 +112,13 @@ impl Overlay {
         let ctx = Context::new(window.clone()).ok()?;
         let surface = Surface::new(&ctx, window.clone()).ok()?;
 
-        Some(Self { window, _ctx: ctx, surface })
+        Some(Self {
+            window,
+            _ctx: ctx,
+            surface,
+            levels: VecDeque::with_capacity(NUM_BARS),
+            level_smooth: 0.0,
+        })
     }
 
     pub fn show(&self) {
@@ -89,150 +129,245 @@ impl Overlay {
         self.window.set_visible(false);
     }
 
-    /// Render one animation frame. `frame` is 0-based, wrapping at `FRAMES`.
-    pub fn render(&mut self, frame: usize) {
-        let w = WIDTH as usize;
-        let h = HEIGHT as usize;
-
-        if self.surface
-            .resize(NonZeroU32::new(WIDTH).unwrap(), NonZeroU32::new(HEIGHT).unwrap())
+    /// Render one frame for `phase`. `frame` drives the periodic animation
+    /// (pulse / sweep); `level` is the live mic amplitude in `[0, 1]` (ignored
+    /// when processing). Smoothing and the scrolling history live here so the
+    /// caller just forwards the raw reading each tick.
+    pub fn render(&mut self, phase: Phase, frame: usize, level: f32) {
+        if self
+            .surface
+            .resize(
+                NonZeroU32::new(WIDTH).unwrap(),
+                NonZeroU32::new(HEIGHT).unwrap(),
+            )
             .is_err()
         {
             return;
         }
+        let Ok(mut buf) = self.surface.buffer_mut() else {
+            return;
+        };
 
-        let Ok(mut buf) = self.surface.buffer_mut() else { return };
+        // Advance the smoothed level + history. `level_smooth`/`levels` and
+        // `surface` (held by `buf`) are disjoint fields, so both borrows coexist.
+        let target = if phase == Phase::Recording { level } else { 0.0 };
+        self.level_smooth += (target - self.level_smooth) * 0.45;
+        self.levels.push_back(self.level_smooth.clamp(0.0, 1.0));
+        while self.levels.len() > NUM_BARS {
+            self.levels.pop_front();
+        }
 
-        // Fill background.
-        buf.fill(BG);
-
-        // Draw rounded-rect border: simple 6 px inset pill outline.
-        let r = 14usize;
-        draw_rounded_rect(&mut buf, w, h, r, xrgb(55, 55, 58));
-
-        // Pulsing dot — 16 px radius, centred vertically, left-aligned.
-        let pulse = pulse_alpha(frame);
-        let dot_r = 10usize;
-        let dot_cx = 32usize;
-        let dot_cy = h / 2;
-        let dot_col = blend(REC_ON, REC_DIM, pulse);
-        draw_circle(&mut buf, w, dot_cx, dot_cy, dot_r, dot_col);
-
-        // Draw three-bar "sound wave" decoration to the right of the dot.
-        draw_bars(&mut buf, w, h, dot_cx + dot_r + 12, frame);
-
-        // Horizontal text stand-in: a bright strip (real text needs a font lib).
-        // We draw "REC" as simple pixel blocks — enough to be readable at a glance.
-        draw_rec_label(&mut buf, w, h, dot_cx + dot_r + 48, TEXT_GREY);
-
+        paint(&mut buf, phase, frame, &self.levels);
         buf.present().ok();
     }
 }
 
-/// Sine-based pulse: returns a value in [0, 255] where FRAMES gives one cycle.
-fn pulse_alpha(frame: usize) -> u8 {
-    let t = frame as f32 / crate::icons::FRAMES as f32;
-    let s = ((t * std::f32::consts::TAU).sin() + 1.0) / 2.0;
-    (s * 255.0) as u8
-}
+/// Paint a whole frame into the softbuffer (XRGB, native-endian).
+fn paint(buf: &mut [u32], phase: Phase, frame: usize, levels: &VecDeque<f32>) {
+    let w = WIDTH as i32;
+    let h = HEIGHT as i32;
+    let cx = w as f32 / 2.0;
+    let cy = h as f32 / 2.0;
+    let half_w = w as f32 / 2.0 - 1.5;
+    let half_h = h as f32 / 2.0 - 1.5;
+    let radius = half_h; // full-height pill
 
-/// Linear blend: 0 = a, 255 = b.
-fn blend(a: u32, b: u32, t: u8) -> u32 {
-    let t = t as u32;
-    let a_r = (a >> 16) & 0xFF;
-    let a_g = (a >> 8) & 0xFF;
-    let a_b = a & 0xFF;
-    let b_r = (b >> 16) & 0xFF;
-    let b_g = (b >> 8) & 0xFF;
-    let b_b = b & 0xFF;
-    let r = (a_r * (255 - t) + b_r * t) / 255;
-    let g = (a_g * (255 - t) + b_g * t) / 255;
-    let b_ = (a_b * (255 - t) + b_b * t) / 255;
-    (r << 16) | (g << 8) | b_
-}
-
-fn set_pixel(buf: &mut [u32], w: usize, x: usize, y: usize, col: u32) {
-    if x < w && y < buf.len() / w {
-        buf[y * w + x] = col;
-    }
-}
-
-fn draw_circle(buf: &mut [u32], w: usize, cx: usize, cy: usize, r: usize, col: u32) {
-    let r2 = (r * r) as i64;
-    for dy in -(r as i64)..=(r as i64) {
-        for dx in -(r as i64)..=(r as i64) {
-            if dx * dx + dy * dy <= r2 {
-                let x = cx as i64 + dx;
-                let y = cy as i64 + dy;
-                if x >= 0 && y >= 0 {
-                    set_pixel(buf, w, x as usize, y as usize, col);
-                }
-            }
-        }
-    }
-}
-
-fn draw_rounded_rect(buf: &mut [u32], w: usize, h: usize, _r: usize, col: u32) {
-    // Simple 1-px border for now (full rounded corners need more maths).
-    for x in 0..w {
-        set_pixel(buf, w, x, 0, col);
-        set_pixel(buf, w, x, h - 1, col);
-    }
+    // Backdrop, then the rounded card with an AA outline, computed per pixel
+    // from a signed distance field (24k px — trivial at the overlay's framerate).
     for y in 0..h {
-        set_pixel(buf, w, 0, y, col);
-        set_pixel(buf, w, w - 1, y, col);
+        for x in 0..w {
+            let idx = (y * w + x) as usize;
+            buf[idx] = pack(BG);
+            let sd = sd_round_rect(x as f32 + 0.5 - cx, y as f32 + 0.5 - cy, half_w, half_h, radius);
+            // Fill: coverage = how far inside the edge this pixel sits.
+            let fill = (0.5 - sd).clamp(0.0, 1.0);
+            if fill > 0.0 {
+                blend(buf, idx, PILL, fill);
+            }
+            // Outline: a ~1 px band hugging the edge from the inside.
+            let ring = (1.0 - (sd + 1.2).abs()).clamp(0.0, 1.0);
+            if ring > 0.0 {
+                blend(buf, idx, RING, ring * 0.9);
+            }
+        }
+    }
+
+    match phase {
+        Phase::Recording => {
+            let pulse = pulse(frame);
+            draw_dot(buf, DOT_CX, cy, 9.0, lerp_rgb(REC_DIM, REC, pulse));
+            draw_meter(buf, cy, levels);
+        }
+        Phase::Processing => {
+            // Dot holds steady amber; an indeterminate sweep replaces the meter.
+            draw_dot(buf, DOT_CX, cy, 9.0, PROC);
+            draw_sweep(buf, cy, frame);
+        }
     }
 }
 
-/// Three animated equaliser bars.
-fn draw_bars(buf: &mut [u32], w: usize, h: usize, x0: usize, frame: usize) {
-    let bar_w = 4usize;
-    let gap = 3usize;
-    let max_bar_h = (h as f32 * 0.55) as usize;
-    let base_y = h / 2;
-    let col = xrgb(100, 180, 255);
+/// Scrolling level meter: one mirrored vertical bar per history sample, newest
+/// at the right so the trace flows leftward as time passes.
+fn draw_meter(buf: &mut [u32], cy: f32, levels: &VecDeque<f32>) {
+    let max_h = HEIGHT as f32 * 0.30; // half-height at full scale
+    let n = levels.len();
+    for (i, &lvl) in levels.iter().enumerate() {
+        // Right-align: the last sample sits at the right edge of the meter.
+        let x = METER_X1 - BAR_W - (n - 1 - i) as f32 * (BAR_W + BAR_GAP);
+        if x < METER_X0 {
+            continue;
+        }
+        let bar_h = (lvl * max_h).max(1.0); // a thin idle line when silent
+        let col = lerp_rgb(WAVE_LO, WAVE_HI, lvl);
+        fill_bar(buf, x, cy - bar_h, x + BAR_W, cy + bar_h, col);
+    }
+}
 
-    for i in 0..3 {
-        let phase = (frame + i * 4) % crate::icons::FRAMES;
-        let t = phase as f32 / crate::icons::FRAMES as f32;
-        let bar_h = (((t * std::f32::consts::TAU).sin() + 1.0) / 2.0 * max_bar_h as f32) as usize + 4;
-        let x = x0 + i * (bar_w + gap);
-        let y_top = base_y.saturating_sub(bar_h / 2);
-        let y_bot = (base_y + bar_h / 2).min(h - 4);
-        for bx in x..(x + bar_w).min(w) {
-            for by in y_top..y_bot {
-                set_pixel(buf, w, bx, by, col);
+/// Indeterminate "working" animation: a soft Gaussian highlight that sweeps
+/// back and forth across the meter region over flat baseline bars.
+fn draw_sweep(buf: &mut [u32], cy: f32, frame: usize) {
+    let span = METER_X1 - METER_X0 - BAR_W;
+    // Triangle wave in [0,1] over one animation period (the caller's frame
+    // counter wraps at `icons::FRAMES`) for a smooth there-and-back sweep.
+    let period = crate::icons::FRAMES as f32;
+    let t = (frame as f32 % period) / period;
+    let tri = 1.0 - (2.0 * t - 1.0).abs();
+    let head = METER_X0 + tri * span;
+
+    let mut x = METER_X0;
+    while x <= METER_X1 - BAR_W {
+        // Distance of this bar from the sweep head → brightness falloff.
+        let d = (x - head).abs() / 26.0;
+        let glow = (-(d * d)).exp(); // Gaussian
+        let bar_h = 2.0 + glow * (HEIGHT as f32 * 0.22);
+        let col = lerp_rgb(WAVE_LO, PROC_SWEEP, glow);
+        fill_bar(buf, x, cy - bar_h, x + BAR_W, cy + bar_h, col);
+        x += BAR_W + BAR_GAP;
+    }
+}
+
+/// A filled vertical bar with horizontal-edge anti-aliasing (fractional column
+/// coverage); vertical extents are clamped into the pill interior.
+fn fill_bar(buf: &mut [u32], x0: f32, y0: f32, x1: f32, y1: f32, col: Rgb) {
+    let y_lo = y0.max(6.0).floor() as i32;
+    let y_hi = y1.min(HEIGHT as f32 - 6.0).ceil() as i32;
+    let xi0 = x0.floor() as i32;
+    let xi1 = x1.ceil() as i32;
+    for x in xi0..xi1 {
+        // Coverage of this pixel column by [x0, x1].
+        let cov = ((x as f32 + 1.0).min(x1) - (x as f32).max(x0)).clamp(0.0, 1.0);
+        if cov <= 0.0 {
+            continue;
+        }
+        for y in y_lo..y_hi {
+            blend_xy(buf, x, y, col, cov);
+        }
+    }
+}
+
+/// Anti-aliased filled circle via signed-distance coverage.
+fn draw_dot(buf: &mut [u32], cx: f32, cy: f32, r: f32, col: Rgb) {
+    let x0 = (cx - r - 1.0).floor() as i32;
+    let x1 = (cx + r + 1.0).ceil() as i32;
+    let y0 = (cy - r - 1.0).floor() as i32;
+    let y1 = (cy + r + 1.0).ceil() as i32;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let dx = x as f32 + 0.5 - cx;
+            let dy = y as f32 + 0.5 - cy;
+            let cov = (r + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
+            if cov > 0.0 {
+                blend_xy(buf, x, y, col, cov);
             }
         }
     }
 }
 
-/// Pixel-art "REC" label using 5×7 bitmap font (no dep needed).
-fn draw_rec_label(buf: &mut [u32], w: usize, h: usize, x0: usize, col: u32) {
-    // Bitmaps for R, E, C — each 5 columns × 7 rows, MSB = top.
-    const R: [u8; 7] = [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001];
-    const E: [u8; 7] = [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111];
-    const C: [u8; 7] = [0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110];
+/// Signed distance from a point to a rounded rectangle centred at the origin
+/// (negative inside). Standard rounded-box SDF.
+fn sd_round_rect(px: f32, py: f32, half_w: f32, half_h: f32, r: f32) -> f32 {
+    let qx = px.abs() - (half_w - r);
+    let qy = py.abs() - (half_h - r);
+    let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
+    outside + qx.max(qy).min(0.0) - r
+}
 
-    let glyphs = [R, E, C];
-    let scale = 2usize;
-    let char_w = 5 * scale;
-    let gap = scale;
-    let char_h = 7 * scale;
-    let y0 = h / 2 - char_h / 2;
+/// Sine pulse in `[0, 1]`; one cycle per `icons::FRAMES` frames.
+fn pulse(frame: usize) -> f32 {
+    let t = frame as f32 / crate::icons::FRAMES as f32;
+    ((t * std::f32::consts::TAU).sin() + 1.0) / 2.0
+}
 
-    for (gi, glyph) in glyphs.iter().enumerate() {
-        let gx = x0 + gi * (char_w + gap);
-        for (row, &bits) in glyph.iter().enumerate() {
-            for col_i in 0..5usize {
-                if (bits >> (4 - col_i)) & 1 == 1 {
-                    for sy in 0..scale {
-                        for sx in 0..scale {
-                            set_pixel(buf, w, gx + col_i * scale + sx, y0 + row * scale + sy, col);
-                        }
-                    }
-                }
-            }
-        }
+/// Pack an RGB triple into softbuffer's native XRGB word.
+fn pack((r, g, b): Rgb) -> u32 {
+    ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+}
+
+/// Linear interpolate between two colours; `t` clamped to `[0, 1]`.
+fn lerp_rgb(a: Rgb, b: Rgb, t: f32) -> Rgb {
+    let t = t.clamp(0.0, 1.0);
+    let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    (mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2))
+}
+
+/// Alpha-composite `col` over the pixel at `idx` with coverage `a` in `[0, 1]`.
+fn blend(buf: &mut [u32], idx: usize, col: Rgb, a: f32) {
+    let a = a.clamp(0.0, 1.0);
+    let dst = buf[idx];
+    let dr = ((dst >> 16) & 0xFF) as f32;
+    let dg = ((dst >> 8) & 0xFF) as f32;
+    let db = (dst & 0xFF) as f32;
+    let r = (col.0 as f32 * a + dr * (1.0 - a)).round() as u32;
+    let g = (col.1 as f32 * a + dg * (1.0 - a)).round() as u32;
+    let b = (col.2 as f32 * a + db * (1.0 - a)).round() as u32;
+    buf[idx] = (r << 16) | (g << 8) | b;
+}
+
+/// `blend` addressed by pixel coordinate, with bounds checking.
+fn blend_xy(buf: &mut [u32], x: i32, y: i32, col: Rgb, a: f32) {
+    if x < 0 || y < 0 || x >= WIDTH as i32 || y >= HEIGHT as i32 {
+        return;
+    }
+    blend(buf, (y * WIDTH as i32 + x) as usize, col, a);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rounded_rect_sdf_sign_matches_inside_outside() {
+        // Centre is well inside (negative); a point far past the corner is
+        // outside (positive); the mid-edge sits ~on the boundary.
+        assert!(sd_round_rect(0.0, 0.0, 50.0, 20.0, 10.0) < 0.0);
+        assert!(sd_round_rect(100.0, 100.0, 50.0, 20.0, 10.0) > 0.0);
+        assert!(sd_round_rect(50.0, 0.0, 50.0, 20.0, 10.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn lerp_endpoints_and_midpoint() {
+        let a = (0, 0, 0);
+        let b = (100, 200, 50);
+        assert_eq!(lerp_rgb(a, b, 0.0), a);
+        assert_eq!(lerp_rgb(a, b, 1.0), b);
+        assert_eq!(lerp_rgb(a, b, 0.5), (50, 100, 25));
+        // t is clamped, not extrapolated.
+        assert_eq!(lerp_rgb(a, b, 2.0), b);
+    }
+
+    #[test]
+    fn full_coverage_blend_replaces_destination() {
+        let mut buf = [pack(BG)];
+        blend(&mut buf, 0, REC, 1.0);
+        assert_eq!(buf[0], pack(REC));
+        // Zero coverage leaves the destination untouched.
+        blend(&mut buf, 0, WAVE_HI, 0.0);
+        assert_eq!(buf[0], pack(REC));
+    }
+
+    #[test]
+    fn meter_shows_at_least_one_bar_of_history() {
+        // NUM_BARS is derived from the geometry; guard against a zero/oops.
+        const { assert!(NUM_BARS > 10) };
     }
 }
