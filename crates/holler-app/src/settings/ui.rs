@@ -240,6 +240,7 @@ pub(super) struct UiState {
     tts_rate_saved: String,
     tts_status: Option<(bool, String)>,
     tts_key_status: SecretStatus,
+    tts_deepgram_key_status: SecretStatus,
     tts_read_combo: String,
     tts_read_clipboard_combo: String,
     tts_stop_combo: String,
@@ -298,6 +299,7 @@ impl UiState {
             tts_rate_saved: rate_to_string(config.tts_rate),
             tts_status: None,
             tts_key_status: holler_config::secret_status("openai"),
+            tts_deepgram_key_status: holler_config::secret_status("deepgram"),
             tts_read_combo: config.tts_read_hotkey.clone(),
             tts_read_clipboard_combo: config.tts_read_clipboard_hotkey.clone(),
             tts_stop_combo: config.tts_stop_hotkey.clone(),
@@ -400,8 +402,9 @@ impl UiState {
                 self.tts_backend_saved = self.tts_backend_draft.clone();
                 self.tts_voice_saved = self.tts_voice_draft.clone();
                 self.tts_rate_saved = self.tts_rate_draft.clone();
-                // Re-probe the OpenAI key so the Cloud hint reflects the truth.
+                // Re-probe the cloud keys so the Cloud hints reflect the truth.
                 self.tts_key_status = holler_config::secret_status("openai");
+                self.tts_deepgram_key_status = holler_config::secret_status("deepgram");
                 (true, "Saved ✓ — used on the next read-aloud".to_string())
             }
             Err(e) => (false, e),
@@ -662,7 +665,7 @@ impl UiState {
         ui.label("Select text anywhere, then press the read-selection hotkey to hear it spoken.");
         ui.add_space(10.0);
 
-        // --- Backend (Native / Cloud) — mirrors the Providers radio pattern. ---
+        // --- Backend (Native / Cloud providers) — mirrors the Providers radios. ---
         ui.strong("Backend");
         ui.add_space(2.0);
         ui.horizontal(|ui| {
@@ -671,17 +674,27 @@ impl UiState {
         });
         ui.horizontal(|ui| {
             ui.radio_value(&mut self.tts_backend_draft, "cloud".to_string(), "Cloud (OpenAI)");
-            match self.tts_key_status {
-                SecretStatus::FromFile => ui.colored_label(OK_GREEN, "key configured ✓"),
-                SecretStatus::FromEnv => ui.colored_label(OK_GREEN, "key configured ✓ (env var)"),
-                _ => ui.weak("no key ✗"),
-            };
+            draw_key_status(ui, self.tts_key_status);
         });
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut self.tts_backend_draft, "deepgram".to_string(), "Cloud (Deepgram)");
+            draw_key_status(ui, self.tts_deepgram_key_status);
+        });
+        // Per-backend missing-key hint (cloud backends fall back to native).
         if self.tts_backend_draft == "cloud" && self.tts_key_status == SecretStatus::Missing {
             ui.indent("tts-cloud-hint", |ui| {
                 ui.colored_label(
                     ERR_RED,
                     "No OpenAI key — set one in Providers; until then read-aloud uses the native voice.",
+                );
+            });
+        } else if self.tts_backend_draft == "deepgram"
+            && self.tts_deepgram_key_status == SecretStatus::Missing
+        {
+            ui.indent("tts-deepgram-hint", |ui| {
+                ui.colored_label(
+                    ERR_RED,
+                    "No Deepgram key — set one in Providers; until then read-aloud uses the native voice.",
                 );
             });
         }
@@ -698,7 +711,7 @@ impl UiState {
                     .desired_width(220.0),
             );
         });
-        ui.weak("Native: a macOS voice name (e.g. Samantha). Cloud: an OpenAI voice (e.g. alloy). Blank = default.");
+        ui.weak("Native: a macOS voice (e.g. Samantha). OpenAI: a voice (e.g. alloy). Deepgram: an Aura model (e.g. aura-2-thalia-en). Blank = default.");
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label("Rate:");
@@ -1071,14 +1084,25 @@ impl UiState {
     }
 }
 
-/// Canonicalise a stored `tts_backend` string to "native" or "cloud" for the
-/// radio buttons, leaning on the same lenient parse the factory uses (so the
-/// legacy "openai" alias selects Cloud).
+/// Canonicalise a stored `tts_backend` string to the radio-button value
+/// ("native" / "cloud" / "deepgram"), leaning on the same lenient parse the
+/// factory uses (so the legacy "openai" alias selects Cloud (OpenAI)).
 fn normalize_backend(s: &str) -> String {
     match holler_tts::TtsBackend::from_config(s) {
-        holler_tts::TtsBackend::Cloud => "cloud".to_string(),
+        holler_tts::TtsBackend::OpenAi => "cloud".to_string(),
+        holler_tts::TtsBackend::Deepgram => "deepgram".to_string(),
         holler_tts::TtsBackend::Native => "native".to_string(),
     }
+}
+
+/// Render a cloud provider's key-presence status next to its backend radio,
+/// mirroring the Providers panel's ✓/✗ treatment.
+fn draw_key_status(ui: &mut egui::Ui, status: SecretStatus) {
+    match status {
+        SecretStatus::FromFile => ui.colored_label(OK_GREEN, "key configured ✓"),
+        SecretStatus::FromEnv => ui.colored_label(OK_GREEN, "key configured ✓ (env var)"),
+        _ => ui.weak("no key ✗"),
+    };
 }
 
 /// Render a stored rate for the text field: 0 (the default sentinel) shows as
@@ -1284,12 +1308,14 @@ mod tests {
     }
 
     #[test]
-    fn backend_normalises_to_two_canonical_values() {
+    fn backend_normalises_to_canonical_values() {
         assert_eq!(normalize_backend("native"), "native");
         assert_eq!(normalize_backend("cloud"), "cloud");
+        assert_eq!(normalize_backend("deepgram"), "deepgram");
         // Legacy alias + case-insensitivity, via the factory's own parser.
         assert_eq!(normalize_backend("openai"), "cloud");
         assert_eq!(normalize_backend("Cloud"), "cloud");
+        assert_eq!(normalize_backend("Deepgram"), "deepgram");
         // Unknown falls back to native (matches build_tts behaviour).
         assert_eq!(normalize_backend("wat"), "native");
     }

@@ -151,7 +151,7 @@ impl TtsProvider for OpenAiTts {
         if self.stop_requested.load(Ordering::SeqCst) {
             return Ok(());
         }
-        self.play_wav(&wav)
+        crate::playback::play_audio(&wav, &self.stop_requested)
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -175,50 +175,6 @@ impl TtsProvider for OpenAiTts {
 
     fn name(&self) -> &str {
         "openai"
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl OpenAiTts {
-    /// Play WAV bytes in-process via `AVAudioPlayer`, blocking until playback
-    /// finishes or [`stop`](Self::stop) is requested. Pumps a short `NSRunLoop`
-    /// slice per iteration (same pattern as the native synthesizer) so the
-    /// player's async callbacks run without ever touching the main loop.
-    fn play_wav(&self, wav: &[u8]) -> Result<(), TtsError> {
-        use objc2::rc::Retained;
-        use objc2::AnyThread;
-        use objc2_avf_audio::AVAudioPlayer;
-        use objc2_foundation::{NSData, NSDate, NSRunLoop};
-
-        // How long each run-loop slice services events before re-checking
-        // playback state / the stop flag.
-        const POLL_SLICE_SECS: f64 = 0.05;
-
-        // `NSData::with_bytes` copies the slice into an owned NSData (no extra
-        // crate features needed). SAFETY (below): `AVAudioPlayer::alloc` +
-        // `initWithData:error:` is the documented designated initialiser; the
-        // player and its run-loop pumping stay on this one thread.
-        let data = NSData::with_bytes(wav);
-        unsafe {
-            let player: Retained<AVAudioPlayer> =
-                AVAudioPlayer::initWithData_error(AVAudioPlayer::alloc(), &data)
-                    .map_err(|e| TtsError::Playback(e.localizedDescription().to_string()))?;
-
-            if !player.play() {
-                return Err(TtsError::Playback("AVAudioPlayer refused to start".into()));
-            }
-
-            let run_loop = NSRunLoop::currentRunLoop();
-            while player.isPlaying() {
-                if self.stop_requested.load(Ordering::SeqCst) {
-                    player.stop();
-                    break;
-                }
-                let until = NSDate::dateWithTimeIntervalSinceNow(POLL_SLICE_SECS);
-                run_loop.runUntilDate(&until);
-            }
-        }
-        Ok(())
     }
 }
 

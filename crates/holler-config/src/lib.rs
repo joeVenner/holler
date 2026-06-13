@@ -34,8 +34,9 @@ pub struct Config {
     /// can't run (Accessibility not granted, or injection failed). Default on.
     #[serde(default = "default_true")]
     pub clipboard_toast: bool,
-    /// TTS (read-aloud) backend: "native" (offline macOS voice, default) or
-    /// "cloud"/"openai" (OpenAI `/v1/audio/speech`, BYOK). Parsed leniently by
+    /// TTS (read-aloud) backend: "native" (offline macOS voice, default),
+    /// "cloud"/"openai" (OpenAI `/v1/audio/speech`, BYOK), or "deepgram"
+    /// (Deepgram Aura `/v1/speak`, BYOK). Parsed leniently by
     /// `holler_tts::TtsBackend::from_config`; unknown values fall back to native.
     #[serde(default = "default_tts_backend")]
     pub tts_backend: String,
