@@ -14,11 +14,15 @@
 //! main winit/event loop. A [`TtsProvider`] owns no live audio handle between
 //! calls, so the app holds an `Arc<dyn TtsProvider>` and speaks per request.
 
+mod deepgram;
 mod factory;
 mod native;
 mod openai;
+#[cfg(target_os = "macos")]
+mod playback;
 pub mod secrets;
 
+pub use deepgram::DeepgramTts;
 pub use factory::{build_tts, ResolvedBackend};
 pub use native::NativeTts;
 pub use openai::OpenAiTts;
@@ -40,18 +44,23 @@ pub trait TtsProvider: Send + Sync {
 /// fall back to the offline [`TtsBackend::Native`] default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TtsBackend {
-    /// Offline macOS system voice (`say` / AVSpeechSynthesizer). No key needed.
+    /// Offline macOS system voice (the `say` binary). No key needed.
     #[default]
     Native,
-    /// OpenAI cloud TTS (BYOK via `secrets.toml`).
-    Cloud,
+    /// OpenAI cloud TTS (BYOK via `secrets.toml`). The legacy `"cloud"` config
+    /// value still maps here.
+    OpenAi,
+    /// Deepgram cloud TTS — Aura voices (BYOK via `secrets.toml`).
+    Deepgram,
 }
 
 impl TtsBackend {
     /// Parse a config string; unknown values fall back to the default (`Native`).
+    /// `"cloud"` remains an alias for OpenAI so pre-existing configs keep working.
     pub fn from_config(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
-            "cloud" | "openai" => TtsBackend::Cloud,
+            "cloud" | "openai" => TtsBackend::OpenAi,
+            "deepgram" => TtsBackend::Deepgram,
             _ => TtsBackend::Native,
         }
     }
@@ -103,8 +112,10 @@ mod tests {
 
     #[test]
     fn backend_parses_case_insensitively() {
-        assert_eq!(TtsBackend::from_config("Cloud"), TtsBackend::Cloud);
-        assert_eq!(TtsBackend::from_config("OPENAI"), TtsBackend::Cloud);
+        // "cloud" stays an OpenAI alias for backward compatibility.
+        assert_eq!(TtsBackend::from_config("Cloud"), TtsBackend::OpenAi);
+        assert_eq!(TtsBackend::from_config("OPENAI"), TtsBackend::OpenAi);
+        assert_eq!(TtsBackend::from_config("Deepgram"), TtsBackend::Deepgram);
         assert_eq!(TtsBackend::from_config("native"), TtsBackend::Native);
         // Unknown -> default.
         assert_eq!(TtsBackend::from_config("wat"), TtsBackend::Native);
