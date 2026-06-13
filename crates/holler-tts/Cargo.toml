@@ -8,5 +8,10 @@ description = "Holler text-to-speech: provider-agnostic TtsProvider trait (nativ
 
 [dependencies]
 holler-config = { path = "../holler-config" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-avf-audio = { version = "0.3", default-features = false, features = ["AVSpeechSynthesis"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSString", "NSRunLoop", "NSDate"] }
 # The cloud (OpenAI) backend lands in a later unit; its deps (reqwest/serde/
 # serde_json, mirroring holler-stt) are added with it to keep this scaffold lean.

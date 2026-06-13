@@ -1742,6 +1742,9 @@ name = "holler-tts"
 version = "0.2.2"
 dependencies = [
  "holler-config",
+ "objc2 0.6.4",
+ "objc2-avf-audio",
+ "objc2-foundation 0.3.2",
 ]
 
 [[package]]
