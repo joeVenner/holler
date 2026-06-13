@@ -58,6 +58,36 @@ pub enum SettingsAction {
     SpeakHistory { text: String },
     /// Stop any in-progress read-aloud.
     StopSpeaking,
+    /// Persist the TTS backend/voice/rate and rebuild the read-aloud provider so
+    /// the change takes effect on the next utterance. `App` replies via
+    /// `SettingsWindow::tts_feedback`.
+    SaveTts {
+        backend: String,
+        voice: String,
+        rate: u32,
+    },
+    /// Re-register one of the three TTS global hotkeys to `combo` (live, no
+    /// restart) and persist it — mirrors `ApplyPttKey`. `App` replies via
+    /// `SettingsWindow::tts_hotkey_feedback`.
+    ApplyTtsHotkey { which: TtsHotkey, combo: String },
+}
+
+/// Which of the three TTS hotkeys an [`SettingsAction::ApplyTtsHotkey`] targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TtsHotkey {
+    ReadSelection,
+    ReadClipboard,
+    Stop,
+}
+
+impl TtsHotkey {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ReadSelection => "Read selection",
+            Self::ReadClipboard => "Read clipboard",
+            Self::Stop => "Stop speaking",
+        }
+    }
 }
 
 /// Everything the Providers panel needs to render one provider row. Adding a
@@ -123,6 +153,7 @@ enum Panel {
     General,
     Hotkey,
     Providers,
+    Tts,
     Permissions,
     History,
     Stats,
@@ -130,10 +161,11 @@ enum Panel {
 }
 
 impl Panel {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::General,
         Self::Hotkey,
         Self::Providers,
+        Self::Tts,
         Self::Permissions,
         Self::History,
         Self::Stats,
@@ -145,6 +177,7 @@ impl Panel {
             Self::General => "General",
             Self::Hotkey => "Hotkey",
             Self::Providers => "Providers",
+            Self::Tts => "Read Aloud",
             Self::Permissions => "Permissions",
             Self::History => "History",
             Self::Stats => "Stats",
@@ -195,6 +228,23 @@ pub(super) struct UiState {
     stats: Option<Stats>,
     stats_requested: bool,
     stats_status: Option<(bool, String)>,
+    // Read Aloud (TTS): backend/voice/rate draft vs saved (Save enabled while
+    // they differ), the OpenAI key status (Cloud falls back to Native without
+    // it), plus the three hotkey combos with a single press-a-combo capture
+    // target (`tts_capturing`) reusing the PTT capture widget.
+    tts_backend_draft: String,
+    tts_voice_draft: String,
+    tts_rate_draft: String,
+    tts_backend_saved: String,
+    tts_voice_saved: String,
+    tts_rate_saved: String,
+    tts_status: Option<(bool, String)>,
+    tts_key_status: SecretStatus,
+    tts_read_combo: String,
+    tts_read_clipboard_combo: String,
+    tts_stop_combo: String,
+    tts_capturing: Option<TtsHotkey>,
+    tts_hotkey_status: Option<(bool, String)>,
     /// Edits confirmed this frame, drained by `SettingsWindow::redraw`.
     pub(super) actions: Vec<SettingsAction>,
 }
@@ -240,6 +290,19 @@ impl UiState {
             stats: None,
             stats_requested: false,
             stats_status: None,
+            tts_backend_draft: normalize_backend(&config.tts_backend),
+            tts_voice_draft: config.tts_voice.clone(),
+            tts_rate_draft: rate_to_string(config.tts_rate),
+            tts_backend_saved: normalize_backend(&config.tts_backend),
+            tts_voice_saved: config.tts_voice.clone(),
+            tts_rate_saved: rate_to_string(config.tts_rate),
+            tts_status: None,
+            tts_key_status: holler_config::secret_status("openai"),
+            tts_read_combo: config.tts_read_hotkey.clone(),
+            tts_read_clipboard_combo: config.tts_read_clipboard_hotkey.clone(),
+            tts_stop_combo: config.tts_stop_hotkey.clone(),
+            tts_capturing: None,
+            tts_hotkey_status: None,
             actions: Vec::new(),
         }
     }
@@ -330,6 +393,37 @@ impl UiState {
         }
     }
 
+    /// Outcome of a `SaveTts` action.
+    pub(super) fn tts_feedback(&mut self, res: Result<(), String>) {
+        self.tts_status = Some(match res {
+            Ok(()) => {
+                self.tts_backend_saved = self.tts_backend_draft.clone();
+                self.tts_voice_saved = self.tts_voice_draft.clone();
+                self.tts_rate_saved = self.tts_rate_draft.clone();
+                // Re-probe the OpenAI key so the Cloud hint reflects the truth.
+                self.tts_key_status = holler_config::secret_status("openai");
+                (true, "Saved ✓ — used on the next read-aloud".to_string())
+            }
+            Err(e) => (false, e),
+        });
+    }
+
+    /// Outcome of an `ApplyTtsHotkey` action. `Ok` carries the new combo label;
+    /// on success the matching combo field is updated in place.
+    pub(super) fn tts_hotkey_feedback(&mut self, which: TtsHotkey, res: Result<String, String>) {
+        self.tts_hotkey_status = Some(match res {
+            Ok(combo) => {
+                match which {
+                    TtsHotkey::ReadSelection => self.tts_read_combo = combo.clone(),
+                    TtsHotkey::ReadClipboard => self.tts_read_clipboard_combo = combo.clone(),
+                    TtsHotkey::Stop => self.tts_stop_combo = combo.clone(),
+                }
+                (true, format!("{} → {combo}", which.label()))
+            }
+            Err(e) => (false, e),
+        });
+    }
+
     pub(super) fn draw(&mut self, ui: &mut egui::Ui) {
         egui::Panel::left("settings-nav")
             .resizable(false)
@@ -350,6 +444,7 @@ impl UiState {
             Panel::General => self.draw_general(ui),
             Panel::Hotkey => self.draw_hotkey(ui),
             Panel::Providers => self.draw_providers(ui),
+            Panel::Tts => self.draw_tts(ui),
             Panel::Permissions => self.draw_permissions(ui),
             Panel::History => self.draw_history(ui),
             Panel::Stats => self.draw_stats(ui),
@@ -559,6 +654,148 @@ impl UiState {
                 ui.weak("Managed by the environment variable — unset it in your shell to change.");
             }
         });
+    }
+
+    fn draw_tts(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Read Aloud");
+        ui.add_space(4.0);
+        ui.label("Select text anywhere, then press the read-selection hotkey to hear it spoken.");
+        ui.add_space(10.0);
+
+        // --- Backend (Native / Cloud) — mirrors the Providers radio pattern. ---
+        ui.strong("Backend");
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut self.tts_backend_draft, "native".to_string(), "Native");
+            ui.weak("Offline macOS system voice · no key needed");
+        });
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut self.tts_backend_draft, "cloud".to_string(), "Cloud (OpenAI)");
+            match self.tts_key_status {
+                SecretStatus::FromFile => ui.colored_label(OK_GREEN, "key configured ✓"),
+                SecretStatus::FromEnv => ui.colored_label(OK_GREEN, "key configured ✓ (env var)"),
+                _ => ui.weak("no key ✗"),
+            };
+        });
+        if self.tts_backend_draft == "cloud" && self.tts_key_status == SecretStatus::Missing {
+            ui.indent("tts-cloud-hint", |ui| {
+                ui.colored_label(
+                    ERR_RED,
+                    "No OpenAI key — set one in Providers; until then read-aloud uses the native voice.",
+                );
+            });
+        }
+        ui.add_space(10.0);
+
+        // --- Voice + rate. Blank voice / 0 rate = the backend default. ---
+        ui.strong("Voice & rate");
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.label("Voice:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.tts_voice_draft)
+                    .hint_text("default voice")
+                    .desired_width(220.0),
+            );
+        });
+        ui.weak("Native: a macOS voice name (e.g. Samantha). Cloud: an OpenAI voice (e.g. alloy). Blank = default.");
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label("Rate:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.tts_rate_draft)
+                    .hint_text("default")
+                    .desired_width(80.0),
+            );
+            ui.weak("words per minute · blank or 0 = default");
+        });
+        // Surface a parse hint so a bad rate doesn't silently fail on Save.
+        if !rate_is_valid(&self.tts_rate_draft) {
+            ui.colored_label(ERR_RED, "Rate must be a whole number (or blank for default).");
+        }
+        ui.add_space(12.0);
+
+        let dirty = self.tts_backend_draft != self.tts_backend_saved
+            || self.tts_voice_draft != self.tts_voice_saved
+            || self.tts_rate_draft != self.tts_rate_saved;
+        ui.horizontal(|ui| {
+            let can_save = dirty && rate_is_valid(&self.tts_rate_draft);
+            if ui.add_enabled(can_save, egui::Button::new("Save")).clicked() {
+                self.tts_status = None;
+                self.actions.push(SettingsAction::SaveTts {
+                    backend: self.tts_backend_draft.clone(),
+                    voice: self.tts_voice_draft.trim().to_string(),
+                    rate: parse_rate(&self.tts_rate_draft),
+                });
+            }
+            if ui.add_enabled(dirty, egui::Button::new("Revert")).clicked() {
+                self.tts_backend_draft = self.tts_backend_saved.clone();
+                self.tts_voice_draft = self.tts_voice_saved.clone();
+                self.tts_rate_draft = self.tts_rate_saved.clone();
+                self.tts_status = None;
+            }
+        });
+        draw_status(ui, &self.tts_status);
+
+        ui.add_space(14.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        // --- The three hotkeys — same press-a-combo capture as the PTT panel,
+        //     applied live (no restart) via ApplyTtsHotkey. ---
+        ui.strong("Hotkeys");
+        ui.add_space(2.0);
+        ui.weak("Applied immediately — no restart. The tray menu's Read Clipboard / Stop items work regardless.");
+        ui.add_space(6.0);
+
+        self.draw_tts_hotkey_row(ui, TtsHotkey::ReadSelection);
+        self.draw_tts_hotkey_row(ui, TtsHotkey::ReadClipboard);
+        self.draw_tts_hotkey_row(ui, TtsHotkey::Stop);
+        draw_status(ui, &self.tts_hotkey_status);
+    }
+
+    /// One hotkey row: the current combo + a "Change" button that flips into the
+    /// shared press-a-combo capture (only one row captures at a time).
+    fn draw_tts_hotkey_row(&mut self, ui: &mut egui::Ui, which: TtsHotkey) {
+        let current = match which {
+            TtsHotkey::ReadSelection => self.tts_read_combo.clone(),
+            TtsHotkey::ReadClipboard => self.tts_read_clipboard_combo.clone(),
+            TtsHotkey::Stop => self.tts_stop_combo.clone(),
+        };
+        ui.horizontal(|ui| {
+            ui.label(format!("{}:", which.label()));
+            ui.strong(&current);
+        });
+        ui.indent((which.label(), "capture"), |ui| {
+            if self.tts_capturing == Some(which) {
+                let _ = ui.button("Press the new combo…  (Esc cancels)");
+                match captured_combo(ui) {
+                    Capture::None => {}
+                    Capture::Cancel => {
+                        self.tts_capturing = None;
+                        self.tts_hotkey_status = None;
+                    }
+                    Capture::Combo(combo) => match holler_config::try_parse_ptt_key(&combo) {
+                        Ok((_, label)) => {
+                            self.tts_capturing = None;
+                            self.tts_hotkey_status =
+                                Some((true, format!("Registering {label}…")));
+                            self.actions
+                                .push(SettingsAction::ApplyTtsHotkey { which, combo });
+                        }
+                        // Stay in capture mode so the user can try another key.
+                        Err(e) => {
+                            self.tts_hotkey_status =
+                                Some((false, format!("Unsupported combo: {e}")));
+                        }
+                    },
+                }
+            } else if ui.button("Change…").clicked() {
+                self.tts_capturing = Some(which);
+                self.tts_hotkey_status = None;
+            }
+        });
+        ui.add_space(4.0);
     }
 
     fn draw_permissions(&mut self, ui: &mut egui::Ui) {
@@ -834,6 +1071,39 @@ impl UiState {
     }
 }
 
+/// Canonicalise a stored `tts_backend` string to "native" or "cloud" for the
+/// radio buttons, leaning on the same lenient parse the factory uses (so the
+/// legacy "openai" alias selects Cloud).
+fn normalize_backend(s: &str) -> String {
+    match holler_tts::TtsBackend::from_config(s) {
+        holler_tts::TtsBackend::Cloud => "cloud".to_string(),
+        holler_tts::TtsBackend::Native => "native".to_string(),
+    }
+}
+
+/// Render a stored rate for the text field: 0 (the default sentinel) shows as
+/// an empty box, anything else as its number.
+fn rate_to_string(rate: u32) -> String {
+    if rate == 0 {
+        String::new()
+    } else {
+        rate.to_string()
+    }
+}
+
+/// True when the rate draft is blank (= default) or a parseable whole number.
+fn rate_is_valid(draft: &str) -> bool {
+    let t = draft.trim();
+    t.is_empty() || t.parse::<u32>().is_ok()
+}
+
+/// Parse the rate draft into the config value; blank/invalid maps to 0 (the
+/// "use the backend default" sentinel). Save is gated on `rate_is_valid`, so a
+/// rejected number never silently reaches here.
+fn parse_rate(draft: &str) -> u32 {
+    draft.trim().parse::<u32>().unwrap_or(0)
+}
+
 /// Display name for a stored provider id, falling back to the raw value for
 /// anything not in the table (forward-compatible with future providers).
 fn provider_display(id: &str) -> &str {
@@ -1011,5 +1281,38 @@ mod tests {
         assert_eq!(provider_display("deepgram"), "Deepgram");
         assert_eq!(provider_display("openai"), "OpenAI");
         assert_eq!(provider_display("future-provider"), "future-provider");
+    }
+
+    #[test]
+    fn backend_normalises_to_two_canonical_values() {
+        assert_eq!(normalize_backend("native"), "native");
+        assert_eq!(normalize_backend("cloud"), "cloud");
+        // Legacy alias + case-insensitivity, via the factory's own parser.
+        assert_eq!(normalize_backend("openai"), "cloud");
+        assert_eq!(normalize_backend("Cloud"), "cloud");
+        // Unknown falls back to native (matches build_tts behaviour).
+        assert_eq!(normalize_backend("wat"), "native");
+    }
+
+    #[test]
+    fn rate_string_round_trips_with_zero_as_blank() {
+        assert_eq!(rate_to_string(0), "");
+        assert_eq!(rate_to_string(180), "180");
+        assert_eq!(parse_rate(""), 0);
+        assert_eq!(parse_rate("  "), 0);
+        assert_eq!(parse_rate("180"), 180);
+        // Invalid maps to the default sentinel (Save is gated on validity).
+        assert_eq!(parse_rate("fast"), 0);
+        assert_eq!(parse_rate("  200 "), 200);
+    }
+
+    #[test]
+    fn rate_validity_accepts_blank_and_whole_numbers_only() {
+        assert!(rate_is_valid(""));
+        assert!(rate_is_valid("   "));
+        assert!(rate_is_valid("180"));
+        assert!(!rate_is_valid("fast"));
+        assert!(!rate_is_valid("-5"));
+        assert!(!rate_is_valid("1.5"));
     }
 }
