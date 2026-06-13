@@ -278,6 +278,25 @@ mod tests {
         assert!(!t.stop_requested.load(Ordering::SeqCst));
     }
 
+    /// Native-path smoke (macOS): synthesising a tiny phrase must drive the
+    /// blocking `speak()` path (build an `AVSpeechSynthesizer`, enqueue an
+    /// utterance, pump the run loop until it reports done) and return `Ok`.
+    ///
+    /// Deterministic + not audio-hardware-dependent: `AVSpeechSynthesizer`
+    /// reports `isSpeaking` from its own state machine regardless of whether an
+    /// output device is present (CI agents have none), and the phrase is short
+    /// (~1 word) so the poll loop exits quickly. It may emit a brief sound on a
+    /// dev machine with speakers, but the assertion is purely on the `Result`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_speak_short_phrase_is_ok() {
+        let t = NativeTts::default();
+        assert!(
+            t.speak("hi").is_ok(),
+            "native speak of a tiny phrase should succeed"
+        );
+    }
+
     /// The wpm→synth-rate mapping must stay within the documented bounds and
     /// move monotonically with wpm (faster wpm → not-slower synth rate).
     #[cfg(target_os = "macos")]
