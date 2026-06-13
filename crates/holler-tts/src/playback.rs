@@ -16,7 +16,7 @@ use crate::TtsError;
 /// without ever touching the main winit/AppKit loop — this is called only on a
 /// worker thread.
 pub(crate) fn play_audio(bytes: &[u8], stop_requested: &AtomicBool) -> Result<(), TtsError> {
-    use objc2::rc::Retained;
+    use objc2::rc::{autoreleasepool, Retained};
     use objc2::AnyThread;
     use objc2_avf_audio::AVAudioPlayer;
     use objc2_foundation::{NSData, NSDate, NSRunLoop};
@@ -44,8 +44,15 @@ pub(crate) fn play_audio(bytes: &[u8], stop_requested: &AtomicBool) -> Result<()
                 player.stop();
                 break;
             }
-            let until = NSDate::dateWithTimeIntervalSinceNow(POLL_SLICE_SECS);
-            run_loop.runUntilDate(&until);
+            // Drain per slice: this worker thread has no ambient autorelease pool
+            // (it isn't AppKit's main thread), so the `NSDate` we create each
+            // iteration plus anything the run loop autoreleases would otherwise
+            // accumulate for the whole utterance. Pumping inside a pool keeps the
+            // long-playback path leak-free and stable.
+            autoreleasepool(|_| {
+                let until = NSDate::dateWithTimeIntervalSinceNow(POLL_SLICE_SECS);
+                run_loop.runUntilDate(&until);
+            });
         }
     }
     Ok(())
