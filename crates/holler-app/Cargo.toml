@@ -24,6 +24,10 @@ arboard = "3.6.1"
 holler-inject = { path = "../holler-inject" }
 holler-store = { path = "../holler-store" }
 holler-config = { path = "../holler-config" }
+# Pluggable read-selection TTS (Native/Cloud). Built via `build_tts(&config)`
+# into an `Arc<dyn TtsProvider>` whose `speak()` blocks → driven on a worker
+# thread; `stop()` is Send+Sync and interrupts from the event handler.
+holler-tts = { path = "../holler-tts" }
 softbuffer = "0.4.8"
 egui = "0.34.3"
 # "clipboard" wires egui-winit's arboard integration so Cmd+V / Ctrl+V land as
