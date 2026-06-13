@@ -38,6 +38,7 @@ use holler_config::Config;
 use holler_inject::{InjectMode, Injector};
 use holler_stt::{DeepgramStt, OpenAiStt, SttProvider};
 use holler_store::History;
+use holler_tts::TtsProvider;
 use mimalloc::MiMalloc;
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
@@ -107,6 +108,21 @@ struct App {
     /// Human-readable PTT combo (e.g. "Ctrl+Alt+Space"), used to rebuild the
     /// default tray tooltip after a transient error message.
     ptt_label: String,
+    /// Read-selection TTS provider, built once at init via `build_tts(&config)`
+    /// (always returns a provider on macOS). `Arc<dyn TtsProvider>` is
+    /// `Send + Sync`, so `speak()` runs on a worker thread (it BLOCKS — pumps a
+    /// run loop — and would freeze the winit loop) while `stop()` can be called
+    /// straight from the event handler to interrupt. Distinct from `tts` below,
+    /// which is the P10 history-viewer "Read aloud" engine (the `tts` crate).
+    read_tts: Option<Arc<dyn TtsProvider>>,
+    /// IDs of the three TTS global hotkeys; `None` while a registration failed
+    /// (combo taken/invalid) — handled gracefully like the PTT key, never panics.
+    tts_read_hotkey_id: Option<u32>,
+    tts_read_clipboard_hotkey_id: Option<u32>,
+    tts_stop_hotkey_id: Option<u32>,
+    /// Tray menu item IDs for the read-clipboard / stop-speaking actions.
+    read_clipboard_item_id: Option<MenuId>,
+    stop_speaking_item_id: Option<MenuId>,
     quit_item_id: Option<MenuId>,
     config_item_id: Option<MenuId>,
     history_item_id: Option<MenuId>,
@@ -198,6 +214,12 @@ impl App {
             tray: None,
             ptt_hotkey_id: None,
             ptt_label: String::new(),
+            read_tts: None,
+            tts_read_hotkey_id: None,
+            tts_read_clipboard_hotkey_id: None,
+            tts_stop_hotkey_id: None,
+            read_clipboard_item_id: None,
+            stop_speaking_item_id: None,
             quit_item_id: None,
             config_item_id: None,
             history_item_id: None,
@@ -249,15 +271,22 @@ impl App {
         let settings_item = MenuItem::new("Settings…", true, None);
         let config_item = MenuItem::new("Edit Settings (config.toml)…", true, None);
         let history_item = MenuItem::new("Open History Folder…", true, None);
+        let read_clipboard_item = MenuItem::new("Read Clipboard Aloud", true, None);
+        let stop_speaking_item = MenuItem::new("Stop Speaking", true, None);
         menu.append(&settings_item).expect("append settings item");
         menu.append(&config_item).expect("append config item");
         menu.append(&history_item).expect("append history item");
+        menu.append(&PredefinedMenuItem::separator()).expect("separator");
+        menu.append(&read_clipboard_item).expect("append read-clipboard item");
+        menu.append(&stop_speaking_item).expect("append stop-speaking item");
         menu.append(&PredefinedMenuItem::separator()).expect("separator");
         let quit_item = MenuItem::new("Quit Holler", true, None);
         menu.append(&quit_item).expect("append Quit menu item");
         self.settings_item_id = Some(settings_item.id().clone());
         self.config_item_id = Some(config_item.id().clone());
         self.history_item_id = Some(history_item.id().clone());
+        self.read_clipboard_item_id = Some(read_clipboard_item.id().clone());
+        self.stop_speaking_item_id = Some(stop_speaking_item.id().clone());
         self.quit_item_id = Some(quit_item.id().clone());
 
         // Grant prompts — built once, shown on demand. Clean labels, no leading
@@ -317,6 +346,23 @@ impl App {
                         );
                     }
                 }
+
+                // --- TTS triggers (read selection / read clipboard / stop) ---
+                // Register the three configured combos on the SAME manager,
+                // mirroring the PTT path: a taken/invalid combo logs + continues
+                // (its id stays `None`) rather than aborting — read-aloud simply
+                // loses that one trigger, the rest of the app is unaffected. The
+                // tray "Read Clipboard" / "Stop Speaking" items work regardless.
+                self.tts_read_hotkey_id =
+                    register_tts_hotkey(&manager, &self.config.tts_read_hotkey, "read selection");
+                self.tts_read_clipboard_hotkey_id = register_tts_hotkey(
+                    &manager,
+                    &self.config.tts_read_clipboard_hotkey,
+                    "read clipboard",
+                );
+                self.tts_stop_hotkey_id =
+                    register_tts_hotkey(&manager, &self.config.tts_stop_hotkey, "stop speaking");
+
                 self.hotkeys = Some(manager);
 
                 // `global-hotkey` has no callback API — only a static channel.
@@ -353,10 +399,40 @@ impl App {
             eprintln!("[holler] toast window unavailable (non-fatal)");
         }
 
+        // Read-selection TTS provider — built once (always returns a provider on
+        // macOS; Cloud only with a key, else Native). `speak()` blocks → it's
+        // only ever called on a worker thread (see `speak_text_off_thread`).
+        let provider = holler_tts::build_tts(&self.config);
+        println!("[holler] read-aloud backend: {}", provider.name());
+        self.read_tts = Some(provider);
+
         println!("[holler] ready — hold {ptt_label} to talk; tray menu → Quit to exit.");
     }
 
     fn on_hotkey(&mut self, event: GlobalHotKeyEvent) {
+        // The TTS triggers fire on key-press only (single action, not a hold).
+        // Match them first; an unrecognised id falls through to the PTT handler.
+        if event.state == HotKeyState::Pressed {
+            if Some(event.id) == self.tts_read_hotkey_id {
+                self.read_selection_aloud();
+                return;
+            }
+            if Some(event.id) == self.tts_read_clipboard_hotkey_id {
+                self.read_clipboard_aloud();
+                return;
+            }
+            if Some(event.id) == self.tts_stop_hotkey_id {
+                self.stop_read_aloud();
+                return;
+            }
+        } else if Some(event.id) == self.tts_read_hotkey_id
+            || Some(event.id) == self.tts_read_clipboard_hotkey_id
+            || Some(event.id) == self.tts_stop_hotkey_id
+        {
+            // Release edge of a TTS trigger — nothing to do (not a hold).
+            return;
+        }
+
         if Some(event.id) != self.ptt_hotkey_id {
             return;
         }
@@ -881,6 +957,85 @@ impl App {
         }
     }
 
+    // ---- Read-selection TTS (T6 triggers) -------------------------------------
+    // These drive the `holler-tts` provider (`self.read_tts`), distinct from the
+    // P10 history "Read aloud" engine (`self.tts`/the `tts` crate) above.
+
+    /// Read-selection hotkey handler: capture the current selection on the MAIN
+    /// thread (enigo/arboard are main-thread-only on macOS — same constraint as
+    /// `deliver`'s injection), then speak it off-thread. No selection ⇒ no-op.
+    fn read_selection_aloud(&mut self) {
+        // `copy_selection` synthesises Cmd+C and reads the clipboard — must run
+        // on the main thread, like injection. It returns the captured String;
+        // only the (blocking) `speak()` is moved to a worker.
+        // Re-check Accessibility in case it was granted while running (mirrors
+        // `deliver`), so `ensure_injector` can build the backend on first grant.
+        self.accessibility_ok = permissions::accessibility_granted();
+        let Some(injector) = self.ensure_injector() else {
+            eprintln!("[holler] read-selection skipped — injector unavailable (grant Accessibility?)");
+            return;
+        };
+        match injector.copy_selection() {
+            Some(text) => {
+                println!("[holler] read selection ({} chars)", text.len());
+                self.speak_text_off_thread(text);
+            }
+            None => println!("[holler] read selection — nothing selected"),
+        }
+    }
+
+    /// Tray "Read Clipboard Aloud": speak whatever text is on the clipboard now
+    /// (no synthetic copy). Clipboard read is main-thread; speak() goes off-thread.
+    fn read_clipboard_aloud(&mut self) {
+        let text = match self.ensure_clipboard() {
+            Some(cb) => cb.get_text().ok(),
+            None => None,
+        };
+        match text {
+            Some(t) if !t.trim().is_empty() => {
+                println!("[holler] read clipboard ({} chars)", t.len());
+                self.speak_text_off_thread(t);
+            }
+            _ => println!("[holler] read clipboard — clipboard is empty"),
+        }
+    }
+
+    /// Speak `text` via the read-selection provider on a worker thread. The
+    /// provider's `speak()` BLOCKS (it pumps a run loop), so it must never run on
+    /// the winit thread. To avoid overlapping utterances we `stop()` any in-flight
+    /// speech first — the provider re-arms its stop flag at the start of `speak()`,
+    /// so the new utterance plays cleanly. `Arc<dyn TtsProvider>` is `Send + Sync`.
+    fn speak_text_off_thread(&self, text: String) {
+        let Some(provider) = &self.read_tts else {
+            eprintln!("[holler] read-aloud unavailable — no TTS provider");
+            return;
+        };
+        // Interrupt anything currently speaking so utterances don't overlap.
+        let _ = provider.stop();
+        let provider = Arc::clone(provider);
+        std::thread::Builder::new()
+            .name("holler-tts-speak".into())
+            .spawn(move || {
+                if let Err(e) = provider.speak(&text) {
+                    eprintln!("[holler] read-aloud failed: {e}");
+                }
+            })
+            .expect("spawn tts speak thread");
+    }
+
+    /// Stop the read-selection provider (hotkey + tray "Stop Speaking"). `stop()`
+    /// is `Send + Sync` and returns immediately — safe to call from the event
+    /// handler; the worker's poll loop sees the flag and halts at the next slice.
+    fn stop_read_aloud(&mut self) {
+        if let Some(provider) = &self.read_tts {
+            if let Err(e) = provider.stop() {
+                eprintln!("[holler] stop read-aloud failed: {e}");
+            } else {
+                println!("[holler] read-aloud stopped");
+            }
+        }
+    }
+
     /// Compute usage statistics for the Settings → Stats panel. Like the
     /// history queries, this runs on the main thread — a single scan of a
     /// local SQLite table is sub-millisecond.
@@ -1057,6 +1212,10 @@ impl ApplicationHandler<UserEvent> for App {
                         .ok()
                         .and_then(|p| p.parent().map(Path::to_path_buf));
                     open_in_os(folder.as_deref());
+                } else if self.read_clipboard_item_id.as_ref() == Some(&e.id) {
+                    self.read_clipboard_aloud();
+                } else if self.stop_speaking_item_id.as_ref() == Some(&e.id) {
+                    self.stop_read_aloud();
                 } else if self.grant_access_item_id.as_ref() == Some(&e.id) {
                     permissions::open_accessibility_settings();
                     println!("[holler] opened Accessibility settings — tray updates automatically once granted.");
@@ -1172,6 +1331,38 @@ fn main() {
     if let Err(err) = event_loop.run_app(&mut app) {
         eprintln!("[holler] fatal: event loop error: {err}");
         std::process::exit(1);
+    }
+}
+
+/// Register one TTS trigger combo on the shared hotkey `manager`, returning its
+/// id on success. Mirrors the PTT graceful-fallback contract: an invalid combo
+/// (`try_parse_ptt_key` error) or a taken combo logs a warning and returns
+/// `None` — the trigger is simply unavailable; nothing panics and the rest of
+/// the app (and the tray equivalents) keep working. `purpose` is for the log.
+fn register_tts_hotkey(
+    manager: &GlobalHotKeyManager,
+    raw: &str,
+    purpose: &str,
+) -> Option<u32> {
+    let (hotkey, label) = match holler_config::try_parse_ptt_key(raw) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            eprintln!("[holler] invalid {purpose} hotkey {raw:?}: {e}; trigger disabled (tray still works).");
+            return None;
+        }
+    };
+    match manager.register(hotkey) {
+        Ok(()) => {
+            println!("[holler] {purpose} hotkey: {label}");
+            Some(hotkey.id())
+        }
+        Err(e) => {
+            eprintln!(
+                "[holler] could not register {purpose} hotkey {label} — it may be taken by \
+                 another app ({e}); trigger disabled (tray still works)."
+            );
+            None
+        }
     }
 }
 
