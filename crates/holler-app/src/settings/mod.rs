@@ -33,7 +33,7 @@ use winit::window::{Window, WindowAttributes, WindowId};
 
 use holler_config::Config;
 use ui::UiState;
-pub use ui::SettingsAction;
+pub use ui::{SettingsAction, TtsHotkey};
 
 use crate::UserEvent;
 
@@ -304,6 +304,19 @@ impl SettingsWindow {
     /// Feed a freshly computed stats snapshot back into the Stats panel.
     pub fn stats_loaded(&mut self, res: Result<holler_store::Stats, String>) {
         self.ui.stats_loaded(res);
+        self.request_redraw();
+    }
+
+    /// Report the outcome of a `SaveTts` action back to the Read Aloud panel.
+    pub fn tts_feedback(&mut self, res: Result<(), String>) {
+        self.ui.tts_feedback(res);
+        self.request_redraw();
+    }
+
+    /// Report the outcome of an `ApplyTtsHotkey` action. `Ok` carries the new
+    /// combo string for the targeted hotkey.
+    pub fn tts_hotkey_feedback(&mut self, which: TtsHotkey, res: Result<String, String>) {
+        self.ui.tts_hotkey_feedback(which, res);
         self.request_redraw();
     }
 }

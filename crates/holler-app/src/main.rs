@@ -51,7 +51,7 @@ use winit::{
     window::WindowId,
 };
 use overlay::Overlay;
-use settings::{SettingsAction, SettingsWindow};
+use settings::{SettingsAction, SettingsWindow, TtsHotkey};
 use toast::Toast;
 
 /// How often the tray animation advances a frame.
@@ -930,6 +930,37 @@ impl App {
                         sw.history_action_feedback(Ok("Stopped".to_string()));
                     }
                 }
+                SettingsAction::SaveTts {
+                    backend,
+                    voice,
+                    rate,
+                } => {
+                    self.config.tts_backend = backend;
+                    self.config.tts_voice = voice;
+                    self.config.tts_rate = rate;
+                    let res = holler_config::save(&self.config).map_err(|e| e.to_string());
+                    match &res {
+                        Ok(()) => {
+                            // Rebuild the read-aloud provider so the new backend/
+                            // voice/rate take effect on the next utterance
+                            // (build_tts always returns a provider; Cloud falls
+                            // back to Native without a key).
+                            let provider = holler_tts::build_tts(&self.config);
+                            println!("[holler] read-aloud backend: {}", provider.name());
+                            self.read_tts = Some(provider);
+                        }
+                        Err(e) => eprintln!("[holler] config save failed (tts): {e}"),
+                    }
+                    if let Some(sw) = &mut self.settings {
+                        sw.tts_feedback(res);
+                    }
+                }
+                SettingsAction::ApplyTtsHotkey { which, combo } => {
+                    let res = self.apply_tts_hotkey(which, &combo);
+                    if let Some(sw) = &mut self.settings {
+                        sw.tts_hotkey_feedback(which, res);
+                    }
+                }
             }
         }
     }
@@ -1093,6 +1124,70 @@ impl App {
         self.reset_tray_tooltip();
         println!("[holler] PTT key changed — hold {label} to talk");
         Ok(label)
+    }
+
+    /// Re-register one of the three TTS global hotkeys to `raw` (live, no
+    /// restart) and persist it. Same conflict-safe ordering as `apply_ptt_key`:
+    /// the new combo registers BEFORE the old one is dropped, so a combo owned
+    /// by another app leaves the current trigger working. Returns the new combo
+    /// string on success (for the panel to display).
+    fn apply_tts_hotkey(&mut self, which: TtsHotkey, raw: &str) -> Result<String, String> {
+        let manager = self
+            .hotkeys
+            .as_ref()
+            .ok_or("global hotkeys are unavailable on this system")?;
+        let (new_hk, label) = holler_config::try_parse_ptt_key(raw)?;
+
+        // The currently registered id + the config field this hotkey owns.
+        let current_id = match which {
+            TtsHotkey::ReadSelection => self.tts_read_hotkey_id,
+            TtsHotkey::ReadClipboard => self.tts_read_clipboard_hotkey_id,
+            TtsHotkey::Stop => self.tts_stop_hotkey_id,
+        };
+        let current_raw = match which {
+            TtsHotkey::ReadSelection => &self.config.tts_read_hotkey,
+            TtsHotkey::ReadClipboard => &self.config.tts_read_clipboard_hotkey,
+            TtsHotkey::Stop => &self.config.tts_stop_hotkey,
+        };
+
+        if Some(new_hk.id()) != current_id {
+            manager.register(new_hk).map_err(|e| {
+                format!("could not register {label} — is it taken by another app? ({e})")
+            })?;
+            // Drop the previous combo if it was registered (re-parse the stored
+            // raw string, the same parse the original registration used).
+            if current_id.is_some() {
+                if let Ok((old_hk, _)) = holler_config::try_parse_ptt_key(current_raw) {
+                    let _ = manager.unregister(old_hk);
+                }
+            }
+            let new_id = Some(new_hk.id());
+            match which {
+                TtsHotkey::ReadSelection => self.tts_read_hotkey_id = new_id,
+                TtsHotkey::ReadClipboard => self.tts_read_clipboard_hotkey_id = new_id,
+                TtsHotkey::Stop => self.tts_stop_hotkey_id = new_id,
+            }
+        }
+
+        // Persist the raw combo (stored verbatim, like ptt_key/the other tts_*).
+        match which {
+            TtsHotkey::ReadSelection => self.config.tts_read_hotkey = raw.to_string(),
+            TtsHotkey::ReadClipboard => self.config.tts_read_clipboard_hotkey = raw.to_string(),
+            TtsHotkey::Stop => self.config.tts_stop_hotkey = raw.to_string(),
+        }
+        holler_config::save(&self.config)
+            .map_err(|e| format!("hotkey is active, but saving config failed: {e}"))?;
+        println!("[holler] {} hotkey changed → {label}", tts_hotkey_purpose(which));
+        Ok(raw.to_string())
+    }
+}
+
+/// Human-readable purpose for a TTS hotkey, for logging.
+fn tts_hotkey_purpose(which: TtsHotkey) -> &'static str {
+    match which {
+        TtsHotkey::ReadSelection => "read selection",
+        TtsHotkey::ReadClipboard => "read clipboard",
+        TtsHotkey::Stop => "stop speaking",
     }
 }
 
