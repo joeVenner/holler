@@ -4,19 +4,22 @@
 //! design. Backends are config-selectable:
 //!
 //! - **Native** ([`NativeTts`], the default): the macOS system voice — offline,
-//!   no API key. Prefers `AVSpeechSynthesizer` (TODO: FFI, a later unit); for
-//!   now it shells out to the `say` binary, which is always present on macOS.
-//! - **Cloud** ([`OpenAiTts`], optional): OpenAI's TTS endpoint via a key in
-//!   `secrets.toml`, mirroring `holler-stt/openai.rs` + `secrets.rs`.
+//!   no API key. Prefers the in-process `AVSpeechSynthesizer` and falls back to
+//!   the `say` binary.
+//! - **Cloud** ([`OpenAiTts`], optional): OpenAI's `/v1/audio/speech` endpoint
+//!   via a key in `secrets.toml`, mirroring `holler-stt/openai.rs` + `secrets.rs`.
+//!   Synthesised WAV bytes are played in-process via `AVAudioPlayer`.
 //!
 //! Speech is **blocking** and meant to run on a worker thread — never on the
 //! main winit/event loop. A [`TtsProvider`] owns no live audio handle between
 //! calls, so the app holds an `Arc<dyn TtsProvider>` and speaks per request.
 
 mod native;
+mod openai;
 pub mod secrets;
 
 pub use native::NativeTts;
+pub use openai::OpenAiTts;
 pub use secrets::{load_key, store_key};
 
 /// Text-to-speech backends. Implementations must be `Send + Sync` so the app
@@ -85,6 +88,12 @@ impl std::fmt::Display for TtsError {
 }
 
 impl std::error::Error for TtsError {}
+
+impl From<reqwest::Error> for TtsError {
+    fn from(e: reqwest::Error) -> Self {
+        TtsError::Http(e.to_string())
+    }
+}
 
 #[cfg(test)]
 mod tests {
