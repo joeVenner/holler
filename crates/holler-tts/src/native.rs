@@ -146,7 +146,14 @@ impl TtsProvider for NativeTts {
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn speak(&self, _text: &str) -> Result<(), TtsError> {
+    fn speak(&self, text: &str) -> Result<(), TtsError> {
+        // Honour the same platform-agnostic contract as the macOS path and the
+        // cloud backends: reset the stop flag, and treat empty text as a silent
+        // no-op rather than an engine error.
+        self.stop_requested.store(false, Ordering::SeqCst);
+        if text.trim().is_empty() {
+            return Ok(());
+        }
         // TODO(windows): SAPI5 / WinRT SpeechSynthesizer.
         // TODO(linux): speech-dispatcher (`spd-say`) or espeak.
         Err(TtsError::Unsupported(
@@ -165,6 +172,9 @@ impl TtsProvider for NativeTts {
 
     #[cfg(not(target_os = "macos"))]
     fn stop(&self) -> Result<(), TtsError> {
+        // Keep the stop-flag bookkeeping identical across platforms even though
+        // no native engine is wired up here yet.
+        self.stop_requested.store(true, Ordering::SeqCst);
         Ok(())
     }
 
