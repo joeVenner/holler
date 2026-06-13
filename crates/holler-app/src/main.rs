@@ -21,6 +21,7 @@
 //!
 //! CLI: `holler set-key openai <KEY>` stores an API key in `secrets.toml`.
 
+mod diagnostics;
 mod icons;
 mod overlay;
 mod permissions;
@@ -1416,6 +1417,10 @@ fn main() {
         run_set_key(&args);
         return;
     }
+
+    // Capture diagnostics before anything else can crash: a bundled tray app has
+    // no console, so without this a panic aborts silently (the "no logs" bug).
+    diagnostics::init();
 
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
