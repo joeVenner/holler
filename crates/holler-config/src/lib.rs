@@ -34,10 +34,46 @@ pub struct Config {
     /// can't run (Accessibility not granted, or injection failed). Default on.
     #[serde(default = "default_true")]
     pub clipboard_toast: bool,
+    /// TTS (read-aloud) backend: "native" (offline macOS voice, default) or
+    /// "cloud"/"openai" (OpenAI `/v1/audio/speech`, BYOK). Parsed leniently by
+    /// `holler_tts::TtsBackend::from_config`; unknown values fall back to native.
+    #[serde(default = "default_tts_backend")]
+    pub tts_backend: String,
+    /// TTS voice name; empty = the backend's default voice.
+    #[serde(default)]
+    pub tts_voice: String,
+    /// TTS speaking rate in words-per-minute; 0 = the backend default.
+    #[serde(default)]
+    pub tts_rate: u32,
+    /// Hotkey combo (e.g. "ctrl+alt+r") that reads the current selection aloud.
+    #[serde(default = "default_tts_read_hotkey")]
+    pub tts_read_hotkey: String,
+    /// Hotkey combo that reads the clipboard contents aloud.
+    #[serde(default = "default_tts_read_clipboard_hotkey")]
+    pub tts_read_clipboard_hotkey: String,
+    /// Hotkey combo that stops any in-progress speech.
+    #[serde(default = "default_tts_stop_hotkey")]
+    pub tts_stop_hotkey: String,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_tts_backend() -> String {
+    "native".to_string()
+}
+
+fn default_tts_read_hotkey() -> String {
+    "ctrl+alt+r".to_string()
+}
+
+fn default_tts_read_clipboard_hotkey() -> String {
+    "ctrl+alt+c".to_string()
+}
+
+fn default_tts_stop_hotkey() -> String {
+    "ctrl+alt+period".to_string()
 }
 
 impl Default for Config {
@@ -49,6 +85,12 @@ impl Default for Config {
             injection_mode: "paste".to_string(),
             vad: true,
             clipboard_toast: true,
+            tts_backend: default_tts_backend(),
+            tts_voice: String::new(),
+            tts_rate: 0,
+            tts_read_hotkey: default_tts_read_hotkey(),
+            tts_read_clipboard_hotkey: default_tts_read_clipboard_hotkey(),
+            tts_stop_hotkey: default_tts_stop_hotkey(),
         }
     }
 }
@@ -58,6 +100,17 @@ impl Config {
     pub fn model_override(&self) -> Option<&str> {
         let m = self.stt_model.trim();
         (!m.is_empty()).then_some(m)
+    }
+
+    /// `tts_voice` if set, else `None` so the backend can use its default voice.
+    pub fn tts_voice_override(&self) -> Option<&str> {
+        let v = self.tts_voice.trim();
+        (!v.is_empty()).then_some(v)
+    }
+
+    /// `tts_rate` words-per-minute if non-zero, else `None` (backend default).
+    pub fn tts_rate_override(&self) -> Option<u32> {
+        (self.tts_rate != 0).then_some(self.tts_rate)
     }
 }
 
@@ -152,6 +205,39 @@ mod tests {
         let back: Config = toml::from_str("stt_provider = \"openai\"\n").unwrap();
         assert_eq!(back.stt_provider, "openai");
         assert_eq!(back.injection_mode, "paste");
+    }
+
+    #[test]
+    fn tts_defaults_are_sane() {
+        let c = Config::default();
+        assert_eq!(c.tts_backend, "native");
+        assert_eq!(c.tts_voice_override(), None);
+        assert_eq!(c.tts_rate_override(), None);
+        assert_eq!(c.tts_read_hotkey, "ctrl+alt+r");
+        assert_eq!(c.tts_read_clipboard_hotkey, "ctrl+alt+c");
+        assert_eq!(c.tts_stop_hotkey, "ctrl+alt+period");
+    }
+
+    #[test]
+    fn tts_fields_default_when_absent() {
+        // An older config file with no tts_* keys must fall back to defaults.
+        let back: Config = toml::from_str("stt_provider = \"openai\"\n").unwrap();
+        assert_eq!(back.tts_backend, "native");
+        assert_eq!(back.tts_voice, "");
+        assert_eq!(back.tts_rate, 0);
+        assert_eq!(back.tts_read_hotkey, "ctrl+alt+r");
+        assert_eq!(back.tts_stop_hotkey, "ctrl+alt+period");
+    }
+
+    #[test]
+    fn tts_voice_and_rate_overrides() {
+        let c = Config {
+            tts_voice: "  Samantha  ".to_string(),
+            tts_rate: 180,
+            ..Default::default()
+        };
+        assert_eq!(c.tts_voice_override(), Some("Samantha"));
+        assert_eq!(c.tts_rate_override(), Some(180));
     }
 
     #[test]

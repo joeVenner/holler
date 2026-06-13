@@ -14,10 +14,12 @@
 //! main winit/event loop. A [`TtsProvider`] owns no live audio handle between
 //! calls, so the app holds an `Arc<dyn TtsProvider>` and speaks per request.
 
+mod factory;
 mod native;
 mod openai;
 pub mod secrets;
 
+pub use factory::{build_tts, ResolvedBackend};
 pub use native::NativeTts;
 pub use openai::OpenAiTts;
 pub use secrets::{load_key, store_key};
