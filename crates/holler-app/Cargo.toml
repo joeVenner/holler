@@ -29,6 +29,11 @@ holler-config = { path = "../holler-config" }
 # thread; `stop()` is Send+Sync and interrupts from the event handler.
 holler-tts = { path = "../holler-tts" }
 softbuffer = "0.4.8"
+# Glyph rasterization for the softbuffer overlays (recording pill, read-aloud
+# popup, clipboard toast). Replaces the old 5×7 bitmap font with the embedded
+# Inter TTF (assets/Inter.ttf) for a modern, anti-aliased macOS look. Already in
+# the tree transitively via egui, so this is a near-free direct dependency.
+ab_glyph = "0.2.32"
 egui = "0.34.3"
 # "clipboard" wires egui-winit's arboard integration so Cmd+V / Ctrl+V land as
 # egui paste events (without it, text fields silently ignore paste). egui_glow

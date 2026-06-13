@@ -21,7 +21,7 @@ use winit::{
     window::{Window, WindowAttributes, WindowId, WindowLevel},
 };
 
-use crate::font::{self, GLYPH_H, SCALE};
+use crate::font;
 use crate::overlay::{blend, pack, sd_round_rect, Rgb};
 
 pub const WIDTH: u32 = 380;
@@ -68,12 +68,12 @@ pub enum Phase {
 impl Phase {
     pub fn label(self) -> &'static str {
         match self {
-            Phase::Triggered => "TRIGGERED",
-            Phase::Generating => "GENERATING",
-            Phase::Speaking => "SPEAKING",
-            Phase::Finished => "DONE",
-            Phase::Stopped => "STOPPED",
-            Phase::Error => "ERROR",
+            Phase::Triggered => "Starting…",
+            Phase::Generating => "Generating…",
+            Phase::Speaking => "Speaking",
+            Phase::Finished => "Done",
+            Phase::Stopped => "Stopped",
+            Phase::Error => "Error",
         }
     }
 
@@ -352,7 +352,7 @@ fn paint(
     draw_dot(buf, DOT_CX, CY, 6.0, dot);
 
     // Status label, vertically centred.
-    let y0 = (h - GLYPH_H * SCALE) / 2;
+    let y0 = (h - font::text_height()) / 2;
     font::draw_text(buf, w, h, TEXT_X, y0, phase.label(), TEXT);
 
     // Controls.

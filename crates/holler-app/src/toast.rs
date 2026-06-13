@@ -5,10 +5,10 @@
 //! a manual paste. Like the recording overlay it's a borderless, always-on-top,
 //! **non-activating** softbuffer window (it must never steal focus from the
 //! field the user is about to paste into), reusing the overlay's anti-aliased
-//! pill paint helpers. Text is a dependency-free 5×7 bitmap font (see
-//! `glyph`) — egui would need a GL context for a momentary toast, and `ab_glyph`
-//! would need an embedded TTF; for a few fixed words a tiny bitmap font is the
-//! leaner, self-contained choice (docs/DISCOVERIES.md, 2026-06-12).
+//! pill paint helpers. Text is rasterized from the shared embedded Inter face
+//! (`font.rs`) for a modern, anti-aliased look — egui would still need a GL
+//! context for a momentary toast, so softbuffer + `ab_glyph` stays the leaner
+//! choice (docs/DISCOVERIES.md, 2026-06-13).
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -20,7 +20,7 @@ use winit::{
     window::{Window, WindowAttributes, WindowLevel},
 };
 
-use crate::font::{self, GLYPH_H, SCALE};
+use crate::font;
 use crate::overlay::{blend, pack, sd_round_rect, Rgb};
 
 pub const WIDTH: u32 = 420;
@@ -150,7 +150,7 @@ fn paint(buf: &mut [u32], msg: &str) {
     let text_w = font::text_width(msg);
     let avail = w - text_left - 18;
     let x0 = text_left + (avail - text_w).max(0) / 2;
-    let y0 = (h - GLYPH_H * SCALE) / 2;
+    let y0 = (h - font::text_height()) / 2;
     font::draw_text(buf, w, h, x0, y0, msg, TEXT);
 }
 
