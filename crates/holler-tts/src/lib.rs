@@ -28,12 +28,29 @@ pub use native::NativeTts;
 pub use openai::OpenAiTts;
 pub use secrets::{load_key, store_key};
 
+/// Progress reported as [`TtsProvider::speak`] advances, so a caller can drive a
+/// status UI without knowing each backend's internals. Cloud backends emit
+/// [`Synthesizing`](SpeakPhase::Synthesizing) during the network round-trip then
+/// [`Playing`](SpeakPhase::Playing) when audio starts; the native `say` backend
+/// has no separable synthesis step and emits `Playing` only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeakPhase {
+    /// Audio is being generated (a cloud network request is in flight).
+    Synthesizing,
+    /// Audio playback has begun.
+    Playing,
+}
+
 /// Text-to-speech backends. Implementations must be `Send + Sync` so the app
 /// can hand an `Arc<dyn TtsProvider>` to a worker thread per utterance.
 pub trait TtsProvider: Send + Sync {
     /// Speak `text` aloud, blocking until playback finishes (or the synthesis
     /// request completes, for cloud backends that hand off to an audio sink).
-    fn speak(&self, text: &str) -> Result<(), TtsError>;
+    /// `on_phase` is invoked as the call moves through [`SpeakPhase`]s — once per
+    /// transition, on the calling (worker) thread — so the caller can surface
+    /// "generating" vs "speaking" without polling. Empty/whitespace `text` is a
+    /// silent no-op and reports no phase.
+    fn speak(&self, text: &str, on_phase: &dyn Fn(SpeakPhase)) -> Result<(), TtsError>;
     /// Stop any in-progress speech immediately. A no-op if nothing is playing.
     fn stop(&self) -> Result<(), TtsError>;
     /// Short label for logging/UI (e.g. "native").

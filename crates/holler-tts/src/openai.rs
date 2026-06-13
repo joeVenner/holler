@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::{load_key, TtsError, TtsProvider};
+use crate::{load_key, SpeakPhase, TtsError, TtsProvider};
 
 pub struct OpenAiTts {
     api_key: String,
@@ -138,30 +138,33 @@ fn parse_api_error(body: &str) -> String {
 
 impl TtsProvider for OpenAiTts {
     #[cfg(target_os = "macos")]
-    fn speak(&self, text: &str) -> Result<(), TtsError> {
+    fn speak(&self, text: &str, on_phase: &dyn Fn(SpeakPhase)) -> Result<(), TtsError> {
         // Fresh utterance: clear any stale stop request from a prior call.
         self.stop_requested.store(false, Ordering::SeqCst);
         if text.trim().is_empty() {
             return Ok(());
         }
 
+        on_phase(SpeakPhase::Synthesizing);
         let wav = self.synthesize(text)?;
         // A stop() arriving during the network round-trip should suppress
         // playback rather than start it.
         if self.stop_requested.load(Ordering::SeqCst) {
             return Ok(());
         }
+        on_phase(SpeakPhase::Playing);
         crate::playback::play_audio(&wav, &self.stop_requested)
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn speak(&self, text: &str) -> Result<(), TtsError> {
+    fn speak(&self, text: &str, on_phase: &dyn Fn(SpeakPhase)) -> Result<(), TtsError> {
         // The cloud request is cross-platform, but in-process playback currently
         // relies on AVFoundation. Other hosts need their own sink (TODO).
         self.stop_requested.store(false, Ordering::SeqCst);
         if text.trim().is_empty() {
             return Ok(());
         }
+        on_phase(SpeakPhase::Synthesizing);
         let _wav = self.synthesize(text)?;
         Err(TtsError::Unsupported(
             "cloud TTS playback is implemented for macOS only in this build".into(),
@@ -226,7 +229,7 @@ mod tests {
         // No key path is exercised and synthesize() is never reached, so this
         // stays offline.
         let p = provider();
-        assert!(p.speak("   ").is_ok());
+        assert!(p.speak("   ", &|_| {}).is_ok());
     }
 
     #[test]
@@ -244,7 +247,7 @@ mod tests {
     fn speak_resets_a_prior_stop_flag() {
         let p = provider();
         assert!(p.stop().is_ok());
-        assert!(p.speak("").is_ok());
+        assert!(p.speak("", &|_| {}).is_ok());
         assert!(!p.stop_requested.load(Ordering::SeqCst));
     }
 }

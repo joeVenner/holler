@@ -1048,7 +1048,7 @@ impl App {
         std::thread::Builder::new()
             .name("holler-tts-speak".into())
             .spawn(move || {
-                if let Err(e) = provider.speak(&text) {
+                if let Err(e) = provider.speak(&text, &|_| {}) {
                     eprintln!("[holler] read-aloud failed: {e}");
                 }
             })
