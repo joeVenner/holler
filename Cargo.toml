@@ -4,6 +4,7 @@ members = [
     "crates/holler-app",
     "crates/holler-audio",
     "crates/holler-stt",
+    "crates/holler-tts",
     "crates/holler-inject",
     "crates/holler-store",
     "crates/holler-config",

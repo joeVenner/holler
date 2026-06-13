@@ -1738,6 +1738,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "holler-tts"
+version = "0.2.2"
+dependencies = [
+ "holler-config",
+]
+
+[[package]]
 name = "hound"
 version = "3.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,12 @@
+[package]
+name = "holler-tts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Holler text-to-speech: provider-agnostic TtsProvider trait (native macOS say/AVSpeechSynthesizer offline default + cloud OpenAI TTS, BYOK)."
+
+[dependencies]
+holler-config = { path = "../holler-config" }
+# The cloud (OpenAI) backend lands in a later unit; its deps (reqwest/serde/
+# serde_json, mirroring holler-stt) are added with it to keep this scaffold lean.
