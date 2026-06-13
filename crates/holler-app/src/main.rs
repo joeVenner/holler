@@ -28,6 +28,7 @@ mod overlay;
 mod permissions;
 mod settings;
 mod speech;
+mod status_popup;
 mod toast;
 
 use std::path::Path;
@@ -49,13 +50,14 @@ use tray_icon::{
 };
 use winit::{
     application::ApplicationHandler,
-    event::{StartCause, WindowEvent},
+    event::{ElementState, MouseButton, StartCause, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     window::WindowId,
 };
 use overlay::Overlay;
 use settings::{SettingsAction, SettingsWindow, TtsHotkey};
 use speech::{SpeechController, SpeechStatus};
+use status_popup::{Phase as PopupPhase, PopupAction, StatusPopup};
 use toast::Toast;
 
 /// How often the tray animation advances a frame.
@@ -134,6 +136,13 @@ struct App {
     speech: Option<SpeechController>,
     /// The last text handed to read-aloud, so "Replay" can speak it again.
     last_spoken: Option<String>,
+    /// Interactive read-aloud status popup (phase + Replay/Stop buttons), created
+    /// hidden at init and shown while a read-aloud is live. `None` if the window
+    /// couldn't be built (non-fatal).
+    status_popup: Option<StatusPopup>,
+    /// When to auto-dismiss the popup after a terminal phase; `None` while it's
+    /// live or hidden. Drives a `WaitUntil` wake like the toast timer.
+    status_hide_at: Option<Instant>,
     /// TTS trigger ids currently held down, to debounce OS key auto-repeat
     /// (repeated Pressed without an intervening Released) — single-shot actions
     /// must fire once per physical press, like the PTT `ptt_held` guard.
@@ -239,6 +248,8 @@ impl App {
             tts_stop_hotkey_id: None,
             speech: None,
             last_spoken: None,
+            status_popup: None,
+            status_hide_at: None,
             tts_held: std::collections::HashSet::new(),
             read_clipboard_item_id: None,
             replay_item_id: None,
@@ -423,6 +434,11 @@ impl App {
         self.toast = Toast::create(event_loop);
         if self.toast.is_none() {
             eprintln!("[holler] toast window unavailable (non-fatal)");
+        }
+        // Read-aloud status popup — created hidden, shown while a reading is live.
+        self.status_popup = StatusPopup::create(event_loop);
+        if self.status_popup.is_none() {
+            eprintln!("[holler] read-aloud status popup unavailable (non-fatal)");
         }
 
         // Read-selection TTS provider — built once (always returns a provider on
@@ -1127,29 +1143,61 @@ impl App {
         }
     }
 
-    /// React to a read-aloud lifecycle transition. For now this logs and mirrors
-    /// the phase onto the tray tooltip; the interactive status popup hooks in
-    /// here next.
+    /// React to a read-aloud lifecycle transition: log it and drive the status
+    /// popup (phase, control availability, and the auto-dismiss timer for the
+    /// terminal phases). The popup is the user-facing channel; the tray tooltip
+    /// stays reserved for errors/hints.
     fn on_speech_status(&mut self, status: SpeechStatus) {
-        let label = match &status {
-            SpeechStatus::Triggered => "read-aloud: triggered",
-            SpeechStatus::Generating => "read-aloud: generating…",
-            SpeechStatus::Speaking => "read-aloud: speaking…",
-            SpeechStatus::Finished => "read-aloud: done",
-            SpeechStatus::Stopped => "read-aloud: stopped",
+        // Map the lifecycle status to a popup phase, whether Stop applies, and
+        // how long (if at all) the popup lingers before auto-dismissing.
+        let (phase, can_stop, dwell) = match &status {
+            SpeechStatus::Triggered => (PopupPhase::Triggered, true, None),
+            SpeechStatus::Generating => (PopupPhase::Generating, true, None),
+            SpeechStatus::Speaking => (PopupPhase::Speaking, true, None),
+            SpeechStatus::Finished => {
+                (PopupPhase::Finished, false, Some(status_popup::DONE_DWELL_SECS))
+            }
+            SpeechStatus::Stopped => {
+                (PopupPhase::Stopped, false, Some(status_popup::DONE_DWELL_SECS))
+            }
             SpeechStatus::Error(e) => {
                 eprintln!("[holler] read-aloud error: {e}");
-                "read-aloud: error"
+                (PopupPhase::Error, false, Some(status_popup::ERROR_DWELL_SECS))
             }
         };
-        println!("[holler] {label}");
-        self.set_tray_tooltip(&format!("Holler — {label}"));
-        // A terminal status clears back to the default tooltip shortly after.
-        if matches!(
-            status,
-            SpeechStatus::Finished | SpeechStatus::Stopped | SpeechStatus::Error(_)
-        ) {
-            self.reset_tray_tooltip();
+        println!("[holler] read-aloud: {}", phase.label());
+
+        let can_replay = self.last_spoken.is_some();
+        if let Some(popup) = &mut self.status_popup {
+            popup.show(phase, can_replay, can_stop);
+        }
+        self.status_hide_at = dwell.map(|secs| Instant::now() + Duration::from_secs(secs));
+    }
+
+    /// Route a pointer event for the status popup: hover tracking and left-click
+    /// hit-testing of the Replay/Stop controls.
+    fn handle_popup_event(&mut self, event: WindowEvent) {
+        match event {
+            WindowEvent::CursorMoved { position, .. } => {
+                if let Some(p) = &mut self.status_popup {
+                    p.on_cursor_moved(position.x, position.y);
+                }
+            }
+            WindowEvent::CursorLeft { .. } => {
+                if let Some(p) = &mut self.status_popup {
+                    p.on_cursor_left();
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => match self.status_popup.as_ref().and_then(StatusPopup::on_click) {
+                Some(PopupAction::Replay) => self.replay_last(),
+                Some(PopupAction::Stop) => self.stop_read_aloud(),
+                None => {}
+            },
+            _ => {}
         }
     }
 
@@ -1322,6 +1370,21 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
         }
+        // Advance the read-aloud popup animation while it's live and animating.
+        if matches!(cause, StartCause::ResumeTimeReached { .. }) {
+            if let Some(popup) = &mut self.status_popup {
+                popup.tick();
+            }
+        }
+        // The popup's post-terminal dwell has elapsed — dismiss it.
+        if let Some(at) = self.status_hide_at {
+            if Instant::now() >= at {
+                self.status_hide_at = None;
+                if let Some(popup) = &mut self.status_popup {
+                    popup.hide();
+                }
+            }
+        }
         // Re-check permissions on every loop wake, rate-limited. Guarded by
         // hotkeys.is_some() so we don't poll before init() has run.
         if self.hotkeys.is_some()
@@ -1346,6 +1409,19 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(at) = self.toast_hide_at {
             // Wake to auto-dismiss the clipboard toast.
             wake = Some(wake.map_or(at, |w| w.min(at)));
+        }
+        if let Some(at) = self.status_hide_at {
+            // Wake to auto-dismiss the read-aloud popup.
+            wake = Some(wake.map_or(at, |w| w.min(at)));
+        }
+        if self
+            .status_popup
+            .as_ref()
+            .is_some_and(StatusPopup::is_animating)
+        {
+            // Animate the popup's status dot while a reading is live.
+            let f = now + FRAME_INTERVAL;
+            wake = Some(wake.map_or(f, |w| w.min(f)));
         }
         if cfg!(target_os = "macos") && self.hotkeys.is_some() {
             // macOS only: poll slowly so the tray (and open Permissions panel)
@@ -1432,9 +1508,19 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, _: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // The read-aloud popup is the one overlay with routed input (hover +
+        // click on its Replay/Stop buttons). Handle it before the settings guard.
+        if self
+            .status_popup
+            .as_ref()
+            .is_some_and(|p| p.window_id() == id)
+        {
+            self.handle_popup_event(event);
+            return;
+        }
         // Route settings-window events to egui; everything else comes from the
-        // overlay, whose events are ignored (it is controlled by PTT state,
-        // not by the user closing it).
+        // recording overlay/toast, whose events are ignored (they are controlled
+        // by app state, not by the user clicking them).
         let Some(sw) = &mut self.settings else { return };
         if sw.window_id() != id {
             return;
