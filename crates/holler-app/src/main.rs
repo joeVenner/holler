@@ -21,10 +21,14 @@
 //!
 //! CLI: `holler set-key openai <KEY>` stores an API key in `secrets.toml`.
 
+mod diagnostics;
+mod font;
 mod icons;
 mod overlay;
 mod permissions;
 mod settings;
+mod speech;
+mod status_popup;
 mod toast;
 
 use std::path::Path;
@@ -46,12 +50,14 @@ use tray_icon::{
 };
 use winit::{
     application::ApplicationHandler,
-    event::{StartCause, WindowEvent},
+    event::{ElementState, MouseButton, StartCause, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     window::WindowId,
 };
 use overlay::Overlay;
 use settings::{SettingsAction, SettingsWindow, TtsHotkey};
+use speech::{SpeechController, SpeechStatus};
+use status_popup::{Phase as PopupPhase, PopupAction, StatusPopup};
 use toast::Toast;
 
 /// How often the tray animation advances a frame.
@@ -86,6 +92,9 @@ enum UserEvent {
     /// egui asked for a repaint of the settings window after this delay
     /// (zero = now). Sent from the repaint callback installed on its Context.
     SettingsRepaint(Duration),
+    /// A read-aloud lifecycle transition from the speech worker (or the app),
+    /// driving the status popup. See `speech::SpeechController`.
+    Speech(SpeechStatus),
 }
 
 /// A successful transcription plus which provider produced it (for history).
@@ -120,8 +129,27 @@ struct App {
     tts_read_hotkey_id: Option<u32>,
     tts_read_clipboard_hotkey_id: Option<u32>,
     tts_stop_hotkey_id: Option<u32>,
-    /// Tray menu item IDs for the read-clipboard / stop-speaking actions.
+    /// Serialized read-aloud pipeline (one worker, epoch-cancelled). Lazily
+    /// spawned on first read-aloud — nothing on the launch path. `None` until
+    /// then. This replaced the old fire-and-forget per-utterance threads that
+    /// could overlap and crash AVFoundation (see `speech`).
+    speech: Option<SpeechController>,
+    /// The last text handed to read-aloud, so "Replay" can speak it again.
+    last_spoken: Option<String>,
+    /// Interactive read-aloud status popup (phase + Replay/Stop buttons), created
+    /// hidden at init and shown while a read-aloud is live. `None` if the window
+    /// couldn't be built (non-fatal).
+    status_popup: Option<StatusPopup>,
+    /// When to auto-dismiss the popup after a terminal phase; `None` while it's
+    /// live or hidden. Drives a `WaitUntil` wake like the toast timer.
+    status_hide_at: Option<Instant>,
+    /// TTS trigger ids currently held down, to debounce OS key auto-repeat
+    /// (repeated Pressed without an intervening Released) — single-shot actions
+    /// must fire once per physical press, like the PTT `ptt_held` guard.
+    tts_held: std::collections::HashSet<u32>,
+    /// Tray menu item IDs for the read-clipboard / replay / stop-speaking actions.
     read_clipboard_item_id: Option<MenuId>,
+    replay_item_id: Option<MenuId>,
     stop_speaking_item_id: Option<MenuId>,
     quit_item_id: Option<MenuId>,
     config_item_id: Option<MenuId>,
@@ -218,7 +246,13 @@ impl App {
             tts_read_hotkey_id: None,
             tts_read_clipboard_hotkey_id: None,
             tts_stop_hotkey_id: None,
+            speech: None,
+            last_spoken: None,
+            status_popup: None,
+            status_hide_at: None,
+            tts_held: std::collections::HashSet::new(),
             read_clipboard_item_id: None,
+            replay_item_id: None,
             stop_speaking_item_id: None,
             quit_item_id: None,
             config_item_id: None,
@@ -272,12 +306,14 @@ impl App {
         let config_item = MenuItem::new("Edit Settings (config.toml)…", true, None);
         let history_item = MenuItem::new("Open History Folder…", true, None);
         let read_clipboard_item = MenuItem::new("Read Clipboard Aloud", true, None);
+        let replay_item = MenuItem::new("Replay Last Reading", true, None);
         let stop_speaking_item = MenuItem::new("Stop Speaking", true, None);
         menu.append(&settings_item).expect("append settings item");
         menu.append(&config_item).expect("append config item");
         menu.append(&history_item).expect("append history item");
         menu.append(&PredefinedMenuItem::separator()).expect("separator");
         menu.append(&read_clipboard_item).expect("append read-clipboard item");
+        menu.append(&replay_item).expect("append replay item");
         menu.append(&stop_speaking_item).expect("append stop-speaking item");
         menu.append(&PredefinedMenuItem::separator()).expect("separator");
         let quit_item = MenuItem::new("Quit Holler", true, None);
@@ -286,6 +322,7 @@ impl App {
         self.config_item_id = Some(config_item.id().clone());
         self.history_item_id = Some(history_item.id().clone());
         self.read_clipboard_item_id = Some(read_clipboard_item.id().clone());
+        self.replay_item_id = Some(replay_item.id().clone());
         self.stop_speaking_item_id = Some(stop_speaking_item.id().clone());
         self.quit_item_id = Some(quit_item.id().clone());
 
@@ -398,6 +435,11 @@ impl App {
         if self.toast.is_none() {
             eprintln!("[holler] toast window unavailable (non-fatal)");
         }
+        // Read-aloud status popup — created hidden, shown while a reading is live.
+        self.status_popup = StatusPopup::create(event_loop);
+        if self.status_popup.is_none() {
+            eprintln!("[holler] read-aloud status popup unavailable (non-fatal)");
+        }
 
         // Read-selection TTS provider — built once (always returns a provider on
         // macOS; Cloud only with a key, else Native). `speak()` blocks → it's
@@ -410,27 +452,33 @@ impl App {
     }
 
     fn on_hotkey(&mut self, event: GlobalHotKeyEvent) {
-        // The TTS triggers fire on key-press only (single action, not a hold).
-        // Match them first; an unrecognised id falls through to the PTT handler.
-        if event.state == HotKeyState::Pressed {
-            if Some(event.id) == self.tts_read_hotkey_id {
-                self.read_selection_aloud();
-                return;
-            }
-            if Some(event.id) == self.tts_read_clipboard_hotkey_id {
-                self.read_clipboard_aloud();
-                return;
-            }
-            if Some(event.id) == self.tts_stop_hotkey_id {
-                self.stop_read_aloud();
-                return;
-            }
-        } else if Some(event.id) == self.tts_read_hotkey_id
+        // The TTS triggers are single-shot (fire once per physical press, not a
+        // hold). Match them first; an unrecognised id falls through to the PTT
+        // handler. `tts_held` debounces OS key auto-repeat so one hold can't
+        // queue a burst of overlapping read-aloud requests.
+        let is_tts = Some(event.id) == self.tts_read_hotkey_id
             || Some(event.id) == self.tts_read_clipboard_hotkey_id
-            || Some(event.id) == self.tts_stop_hotkey_id
-        {
-            // Release edge of a TTS trigger — nothing to do (not a hold).
-            return;
+            || Some(event.id) == self.tts_stop_hotkey_id;
+        if event.state == HotKeyState::Pressed {
+            if is_tts {
+                if !self.tts_held.insert(event.id) {
+                    return; // already held — auto-repeat; ignore.
+                }
+                if Some(event.id) == self.tts_read_hotkey_id {
+                    self.read_selection_aloud();
+                } else if Some(event.id) == self.tts_read_clipboard_hotkey_id {
+                    self.read_clipboard_aloud();
+                } else {
+                    self.stop_read_aloud();
+                }
+                return;
+            }
+        } else {
+            // Release edge: clear the hold guard. If it was a TTS trigger there's
+            // nothing else to do (not a press/release hold like PTT).
+            if self.tts_held.remove(&event.id) || is_tts {
+                return;
+            }
         }
 
         if Some(event.id) != self.ptt_hotkey_id {
@@ -1009,7 +1057,7 @@ impl App {
         match injector.copy_selection() {
             Some(text) => {
                 println!("[holler] read selection ({} chars)", text.len());
-                self.speak_text_off_thread(text);
+                self.start_speaking(text);
             }
             None => println!("[holler] read selection — nothing selected"),
         }
@@ -1025,45 +1073,131 @@ impl App {
         match text {
             Some(t) if !t.trim().is_empty() => {
                 println!("[holler] read clipboard ({} chars)", t.len());
-                self.speak_text_off_thread(t);
+                self.start_speaking(t);
             }
             _ => println!("[holler] read clipboard — clipboard is empty"),
         }
     }
 
-    /// Speak `text` via the read-selection provider on a worker thread. The
-    /// provider's `speak()` BLOCKS (it pumps a run loop), so it must never run on
-    /// the winit thread. To avoid overlapping utterances we `stop()` any in-flight
-    /// speech first — the provider re-arms its stop flag at the start of `speak()`,
-    /// so the new utterance plays cleanly. `Arc<dyn TtsProvider>` is `Send + Sync`.
-    fn speak_text_off_thread(&self, text: String) {
-        let Some(provider) = &self.read_tts else {
+    /// Lazily spawn the serialized speech worker on first read-aloud (nothing on
+    /// the launch path). Returns `None` only if there's no TTS provider — which
+    /// can't happen on macOS, where `build_tts` always yields at least Native.
+    fn ensure_speech(&mut self) -> Option<&mut SpeechController> {
+        if self.read_tts.is_none() {
+            eprintln!("[holler] read-aloud unavailable — no TTS provider");
+            return None;
+        }
+        if self.speech.is_none() {
+            self.speech = Some(SpeechController::spawn(self.proxy.clone()));
+        }
+        self.speech.as_mut()
+    }
+
+    /// Begin reading `text` aloud: remember it (for Replay), surface the
+    /// `Triggered` status immediately, and hand it to the serialized worker,
+    /// which cancels anything in flight. The worker drives the rest of the status
+    /// transitions back through the proxy. Blank text is a no-op.
+    fn start_speaking(&mut self, text: String) {
+        if text.trim().is_empty() {
+            return;
+        }
+        let Some(provider) = self.read_tts.as_ref().map(Arc::clone) else {
             eprintln!("[holler] read-aloud unavailable — no TTS provider");
             return;
         };
-        // Interrupt anything currently speaking so utterances don't overlap.
-        let _ = provider.stop();
-        let provider = Arc::clone(provider);
-        std::thread::Builder::new()
-            .name("holler-tts-speak".into())
-            .spawn(move || {
-                if let Err(e) = provider.speak(&text) {
-                    eprintln!("[holler] read-aloud failed: {e}");
-                }
-            })
-            .expect("spawn tts speak thread");
+        self.last_spoken = Some(text.clone());
+        self.on_speech_status(SpeechStatus::Triggered);
+        if let Some(speech) = self.ensure_speech() {
+            speech.speak(text, provider);
+        }
     }
 
-    /// Stop the read-selection provider (hotkey + tray "Stop Speaking"). `stop()`
-    /// is `Send + Sync` and returns immediately — safe to call from the event
-    /// handler; the worker's poll loop sees the flag and halts at the next slice.
-    fn stop_read_aloud(&mut self) {
-        if let Some(provider) = &self.read_tts {
-            if let Err(e) = provider.stop() {
-                eprintln!("[holler] stop read-aloud failed: {e}");
-            } else {
-                println!("[holler] read-aloud stopped");
+    /// Replay the last utterance (popup ⟲ button / tray "Replay Last Reading").
+    /// No-op when nothing has been read aloud yet this session.
+    fn replay_last(&mut self) {
+        match self.last_spoken.clone() {
+            Some(text) => {
+                println!("[holler] replaying last reading ({} chars)", text.len());
+                self.start_speaking(text);
             }
+            None => println!("[holler] replay — nothing has been read aloud yet"),
+        }
+    }
+
+    /// Stop the in-flight read-aloud (hotkey / tray "Stop Speaking" / popup ◼).
+    /// Interrupts the worker and surfaces `Stopped` itself (the worker stays quiet
+    /// for a cancelled job). Falls back to a direct provider stop if the worker
+    /// was never spawned.
+    fn stop_read_aloud(&mut self) {
+        match &mut self.speech {
+            Some(speech) => {
+                speech.stop();
+                println!("[holler] read-aloud stopped");
+                self.on_speech_status(SpeechStatus::Stopped);
+            }
+            None => {
+                if let Some(provider) = &self.read_tts {
+                    let _ = provider.stop();
+                }
+            }
+        }
+    }
+
+    /// React to a read-aloud lifecycle transition: log it and drive the status
+    /// popup (phase, control availability, and the auto-dismiss timer for the
+    /// terminal phases). The popup is the user-facing channel; the tray tooltip
+    /// stays reserved for errors/hints.
+    fn on_speech_status(&mut self, status: SpeechStatus) {
+        // Map the lifecycle status to a popup phase, whether Stop applies, and
+        // how long (if at all) the popup lingers before auto-dismissing.
+        let (phase, can_stop, dwell) = match &status {
+            SpeechStatus::Triggered => (PopupPhase::Triggered, true, None),
+            SpeechStatus::Generating => (PopupPhase::Generating, true, None),
+            SpeechStatus::Speaking => (PopupPhase::Speaking, true, None),
+            SpeechStatus::Finished => {
+                (PopupPhase::Finished, false, Some(status_popup::DONE_DWELL_SECS))
+            }
+            SpeechStatus::Stopped => {
+                (PopupPhase::Stopped, false, Some(status_popup::DONE_DWELL_SECS))
+            }
+            SpeechStatus::Error(e) => {
+                eprintln!("[holler] read-aloud error: {e}");
+                (PopupPhase::Error, false, Some(status_popup::ERROR_DWELL_SECS))
+            }
+        };
+        println!("[holler] read-aloud: {}", phase.label());
+
+        let can_replay = self.last_spoken.is_some();
+        if let Some(popup) = &mut self.status_popup {
+            popup.show(phase, can_replay, can_stop);
+        }
+        self.status_hide_at = dwell.map(|secs| Instant::now() + Duration::from_secs(secs));
+    }
+
+    /// Route a pointer event for the status popup: hover tracking and left-click
+    /// hit-testing of the Replay/Stop controls.
+    fn handle_popup_event(&mut self, event: WindowEvent) {
+        match event {
+            WindowEvent::CursorMoved { position, .. } => {
+                if let Some(p) = &mut self.status_popup {
+                    p.on_cursor_moved(position.x, position.y);
+                }
+            }
+            WindowEvent::CursorLeft { .. } => {
+                if let Some(p) = &mut self.status_popup {
+                    p.on_cursor_left();
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => match self.status_popup.as_ref().and_then(StatusPopup::on_click) {
+                Some(PopupAction::Replay) => self.replay_last(),
+                Some(PopupAction::Stop) => self.stop_read_aloud(),
+                None => {}
+            },
+            _ => {}
         }
     }
 
@@ -1236,6 +1370,21 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
         }
+        // Advance the read-aloud popup animation while it's live and animating.
+        if matches!(cause, StartCause::ResumeTimeReached { .. }) {
+            if let Some(popup) = &mut self.status_popup {
+                popup.tick();
+            }
+        }
+        // The popup's post-terminal dwell has elapsed — dismiss it.
+        if let Some(at) = self.status_hide_at {
+            if Instant::now() >= at {
+                self.status_hide_at = None;
+                if let Some(popup) = &mut self.status_popup {
+                    popup.hide();
+                }
+            }
+        }
         // Re-check permissions on every loop wake, rate-limited. Guarded by
         // hotkeys.is_some() so we don't poll before init() has run.
         if self.hotkeys.is_some()
@@ -1260,6 +1409,19 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(at) = self.toast_hide_at {
             // Wake to auto-dismiss the clipboard toast.
             wake = Some(wake.map_or(at, |w| w.min(at)));
+        }
+        if let Some(at) = self.status_hide_at {
+            // Wake to auto-dismiss the read-aloud popup.
+            wake = Some(wake.map_or(at, |w| w.min(at)));
+        }
+        if self
+            .status_popup
+            .as_ref()
+            .is_some_and(StatusPopup::is_animating)
+        {
+            // Animate the popup's status dot while a reading is live.
+            let f = now + FRAME_INTERVAL;
+            wake = Some(wake.map_or(f, |w| w.min(f)));
         }
         if cfg!(target_os = "macos") && self.hotkeys.is_some() {
             // macOS only: poll slowly so the tray (and open Permissions panel)
@@ -1309,6 +1471,8 @@ impl ApplicationHandler<UserEvent> for App {
                     open_in_os(folder.as_deref());
                 } else if self.read_clipboard_item_id.as_ref() == Some(&e.id) {
                     self.read_clipboard_aloud();
+                } else if self.replay_item_id.as_ref() == Some(&e.id) {
+                    self.replay_last();
                 } else if self.stop_speaking_item_id.as_ref() == Some(&e.id) {
                     self.stop_read_aloud();
                 } else if self.grant_access_item_id.as_ref() == Some(&e.id) {
@@ -1339,13 +1503,24 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 // A delay too large for Instant means "no repaint needed".
             }
+            UserEvent::Speech(status) => self.on_speech_status(status),
         }
     }
 
     fn window_event(&mut self, _: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // The read-aloud popup is the one overlay with routed input (hover +
+        // click on its Replay/Stop buttons). Handle it before the settings guard.
+        if self
+            .status_popup
+            .as_ref()
+            .is_some_and(|p| p.window_id() == id)
+        {
+            self.handle_popup_event(event);
+            return;
+        }
         // Route settings-window events to egui; everything else comes from the
-        // overlay, whose events are ignored (it is controlled by PTT state,
-        // not by the user closing it).
+        // recording overlay/toast, whose events are ignored (they are controlled
+        // by app state, not by the user clicking them).
         let Some(sw) = &mut self.settings else { return };
         if sw.window_id() != id {
             return;
@@ -1416,6 +1591,10 @@ fn main() {
         run_set_key(&args);
         return;
     }
+
+    // Capture diagnostics before anything else can crash: a bundled tray app has
+    // no console, so without this a panic aborts silently (the "no logs" bug).
+    diagnostics::init();
 
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()

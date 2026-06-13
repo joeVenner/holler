@@ -17,7 +17,7 @@ use std::time::Duration;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::Deserialize;
 
-use crate::{load_key, TtsError, TtsProvider};
+use crate::{load_key, SpeakPhase, TtsError, TtsProvider};
 
 pub struct DeepgramTts {
     api_key: String,
@@ -136,27 +136,30 @@ fn parse_api_error(body: &str) -> String {
 
 impl TtsProvider for DeepgramTts {
     #[cfg(target_os = "macos")]
-    fn speak(&self, text: &str) -> Result<(), TtsError> {
+    fn speak(&self, text: &str, on_phase: &dyn Fn(SpeakPhase)) -> Result<(), TtsError> {
         self.stop_requested.store(false, Ordering::SeqCst);
         if text.trim().is_empty() {
             return Ok(());
         }
+        on_phase(SpeakPhase::Synthesizing);
         let wav = self.synthesize(text)?;
         // A stop() during the network round-trip should suppress playback.
         if self.stop_requested.load(Ordering::SeqCst) {
             return Ok(());
         }
+        on_phase(SpeakPhase::Playing);
         crate::playback::play_audio(&wav, &self.stop_requested)
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn speak(&self, text: &str) -> Result<(), TtsError> {
+    fn speak(&self, text: &str, on_phase: &dyn Fn(SpeakPhase)) -> Result<(), TtsError> {
         // The cloud request is cross-platform, but in-process playback currently
         // relies on AVFoundation. Other hosts need their own sink (TODO).
         self.stop_requested.store(false, Ordering::SeqCst);
         if text.trim().is_empty() {
             return Ok(());
         }
+        on_phase(SpeakPhase::Synthesizing);
         let _wav = self.synthesize(text)?;
         Err(TtsError::Unsupported(
             "cloud TTS playback is implemented for macOS only in this build".into(),
@@ -220,7 +223,7 @@ mod tests {
 
     #[test]
     fn empty_text_is_a_silent_noop_without_a_network_call() {
-        assert!(provider().speak("   ").is_ok());
+        assert!(provider().speak("   ", &|_| {}).is_ok());
     }
 
     #[test]
@@ -235,7 +238,7 @@ mod tests {
     fn speak_resets_a_prior_stop_flag() {
         let p = provider();
         assert!(p.stop().is_ok());
-        assert!(p.speak("").is_ok());
+        assert!(p.speak("", &|_| {}).is_ok());
         assert!(!p.stop_requested.load(Ordering::SeqCst));
     }
 }

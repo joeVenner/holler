@@ -24,7 +24,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
-use crate::{TtsError, TtsProvider};
+use crate::{SpeakPhase, TtsError, TtsProvider};
 
 /// Offline system-voice TTS. Holds the in-flight `say` child so
 /// [`stop`](Self::stop) can interrupt it, plus a cross-thread stop flag the poll
@@ -134,7 +134,7 @@ impl NativeTts {
 
 impl TtsProvider for NativeTts {
     #[cfg(target_os = "macos")]
-    fn speak(&self, text: &str) -> Result<(), TtsError> {
+    fn speak(&self, text: &str, on_phase: &dyn Fn(SpeakPhase)) -> Result<(), TtsError> {
         // Fresh utterance: clear any stale stop request from a prior call
         // (before the empty-text shortcut, so speak() always resets the flag).
         self.stop_requested.store(false, Ordering::SeqCst);
@@ -142,11 +142,13 @@ impl TtsProvider for NativeTts {
         if text.trim().is_empty() {
             return Ok(());
         }
+        // `say` generates and plays in one step, so we jump straight to Playing.
+        on_phase(SpeakPhase::Playing);
         self.speak_via_say(text)
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn speak(&self, text: &str) -> Result<(), TtsError> {
+    fn speak(&self, text: &str, _on_phase: &dyn Fn(SpeakPhase)) -> Result<(), TtsError> {
         // Honour the same platform-agnostic contract as the macOS path and the
         // cloud backends: reset the stop flag, and treat empty text as a silent
         // no-op rather than an engine error.
@@ -205,7 +207,7 @@ mod tests {
     fn empty_text_is_a_silent_noop() {
         // Must not start an engine (and must not error) on whitespace-only input.
         let t = NativeTts::default();
-        assert!(t.speak("   ").is_ok());
+        assert!(t.speak("   ", &|_| {}).is_ok());
     }
 
     #[test]
@@ -222,7 +224,7 @@ mod tests {
         assert!(t.stop().is_ok());
         assert!(t.stop_requested.load(Ordering::SeqCst));
         // An empty utterance is a no-op but still resets the stop flag.
-        assert!(t.speak("").is_ok());
+        assert!(t.speak("", &|_| {}).is_ok());
         assert!(!t.stop_requested.load(Ordering::SeqCst));
     }
 
@@ -236,7 +238,7 @@ mod tests {
     fn native_speak_short_phrase_is_ok() {
         let t = NativeTts::default();
         assert!(
-            t.speak("hi").is_ok(),
+            t.speak("hi", &|_| {}).is_ok(),
             "native speak of a tiny phrase should succeed"
         );
     }

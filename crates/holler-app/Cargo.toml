@@ -38,6 +38,12 @@ glutin = "0.32.3"
 glutin-winit = "0.5.0"
 tts = "0.26.3"
 
+# Unix-only: redirect stdout/stderr to the diagnostics log file (dup2) so a
+# Finder-launched tray app — which has no console — still captures every
+# println!/eprintln! and the panic/abort message. See `diagnostics.rs`.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # macOS-only: query AVCaptureDevice for live microphone authorization status
 # and request access (permissions.rs). Pinned to the objc2 0.6 / objc2-foundation
 # 0.3 versions winit already brings in transitively; block2 supplies the ObjC

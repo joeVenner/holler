@@ -148,6 +148,14 @@ pub fn config_path() -> Result<PathBuf, ConfigError> {
     Ok(project_dirs()?.config_dir().join("config.toml"))
 }
 
+/// `<data_dir>/Holler/holler.log` — the rolling diagnostics log. Lives in the
+/// data dir (next to `history.db`), not the config dir: it's machine state, not
+/// user-editable settings. A tray agent launched from Finder has no console, so
+/// this file is the only place `eprintln!`/panic output can actually be seen.
+pub fn log_path() -> Result<PathBuf, ConfigError> {
+    Ok(project_dirs()?.data_dir().join("holler.log"))
+}
+
 /// Load the config, creating a default file on first run.
 pub fn load_or_create() -> Result<Config, ConfigError> {
     let path = config_path()?;
