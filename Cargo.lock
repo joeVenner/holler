@@ -1667,7 +1667,7 @@ checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
 name = "holler-app"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "arboard",
  "block2 0.6.2",
@@ -1693,7 +1693,7 @@ dependencies = [
 
 [[package]]
 name = "holler-audio"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "cpal",
  "rubato",
@@ -1702,7 +1702,7 @@ dependencies = [
 
 [[package]]
 name = "holler-config"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "directories",
  "global-hotkey",
@@ -1712,7 +1712,7 @@ dependencies = [
 
 [[package]]
 name = "holler-inject"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "arboard",
  "enigo",
@@ -1720,7 +1720,7 @@ dependencies = [
 
 [[package]]
 name = "holler-store"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "directories",
  "rusqlite",
@@ -1728,7 +1728,7 @@ dependencies = [
 
 [[package]]
 name = "holler-stt"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "holler-config",
  "hound",
