@@ -22,6 +22,7 @@
 //! CLI: `holler set-key openai <KEY>` stores an API key in `secrets.toml`.
 
 mod diagnostics;
+mod font;
 mod icons;
 mod overlay;
 mod permissions;

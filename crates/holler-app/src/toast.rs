@@ -20,6 +20,7 @@ use winit::{
     window::{Window, WindowAttributes, WindowLevel},
 };
 
+use crate::font::{self, GLYPH_H, SCALE};
 use crate::overlay::{blend, pack, sd_round_rect, Rgb};
 
 pub const WIDTH: u32 = 420;
@@ -32,11 +33,6 @@ const PILL: Rgb = (40, 40, 46);
 const RING: Rgb = (70, 70, 80);
 const TEXT: Rgb = (224, 224, 230);
 const ACCENT: Rgb = (96, 174, 255); // small left dot, echoes the overlay meter
-
-const SCALE: i32 = 2; // 5×7 glyph → 10×14 px
-const GLYPH_W: i32 = 5;
-const GLYPH_H: i32 = 7;
-const ADVANCE: i32 = (GLYPH_W + 1) * SCALE; // one blank column between glyphs
 
 /// Owns the toast window and its softbuffer surface. Created once (hidden) and
 /// shown on demand — the same resident-but-hidden model as the overlay.
@@ -151,46 +147,11 @@ fn paint(buf: &mut [u32], msg: &str) {
 
     // Centre the text in the space right of the dot.
     let text_left = 40;
-    let text_w = text_width(msg);
+    let text_w = font::text_width(msg);
     let avail = w - text_left - 18;
     let x0 = text_left + (avail - text_w).max(0) / 2;
     let y0 = (h - GLYPH_H * SCALE) / 2;
-    draw_text(buf, x0, y0, msg, TEXT);
-}
-
-/// Total rendered pixel width of `msg` (no trailing inter-glyph gap).
-fn text_width(msg: &str) -> i32 {
-    let n = msg.chars().count() as i32;
-    if n == 0 {
-        0
-    } else {
-        n * ADVANCE - SCALE
-    }
-}
-
-/// Draw `msg` as 5×7 bitmap glyphs at scale `SCALE`, top-left at `(x0, y0)`.
-fn draw_text(buf: &mut [u32], x0: i32, y0: i32, msg: &str, col: Rgb) {
-    let mut x = x0;
-    for ch in msg.chars() {
-        let g = glyph(ch);
-        for (row, bits) in g.iter().enumerate() {
-            for c in 0..GLYPH_W {
-                if (bits >> (GLYPH_W - 1 - c)) & 1 == 1 {
-                    fill_cell(buf, x + c * SCALE, y0 + row as i32 * SCALE, col);
-                }
-            }
-        }
-        x += ADVANCE;
-    }
-}
-
-/// Fill one `SCALE`×`SCALE` font cell (crisp, full coverage).
-fn fill_cell(buf: &mut [u32], px: i32, py: i32, col: Rgb) {
-    for dy in 0..SCALE {
-        for dx in 0..SCALE {
-            put(buf, px + dx, py + dy, col, 1.0);
-        }
-    }
+    font::draw_text(buf, w, h, x0, y0, msg, TEXT);
 }
 
 /// Anti-aliased filled dot (coverage from distance), bounds-checked.
@@ -219,71 +180,17 @@ fn put(buf: &mut [u32], x: i32, y: i32, col: Rgb, a: f32) {
     blend(buf, (y * WIDTH as i32 + x) as usize, col, a);
 }
 
-/// 5×7 uppercase bitmap font (each row is 5 bits, MSB = leftmost column).
-/// Covers A–Z, space, and the punctuation the toast needs; lowercase is folded
-/// to uppercase and anything unmapped renders blank.
-fn glyph(ch: char) -> [u8; 7] {
-    match ch.to_ascii_uppercase() {
-        'A' => [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
-        'B' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110],
-        'C' => [0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110],
-        'D' => [0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110],
-        'E' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
-        'F' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000],
-        'G' => [0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111],
-        'H' => [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
-        'I' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111],
-        'J' => [0b00111, 0b00010, 0b00010, 0b00010, 0b10010, 0b10010, 0b01100],
-        'K' => [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001],
-        'L' => [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111],
-        'M' => [0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001],
-        'N' => [0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001],
-        'O' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
-        'P' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000],
-        'Q' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101],
-        'R' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001],
-        'S' => [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110],
-        'T' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100],
-        'U' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
-        'V' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100],
-        'W' => [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001],
-        'X' => [0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001],
-        'Y' => [0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100],
-        'Z' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111],
-        // Dash / em-dash: a single mid-height bar.
-        '-' | '—' => [0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000],
-        '.' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00100],
-        '\'' => [0b00100, 0b00100, 0b00100, 0b00000, 0b00000, 0b00000, 0b00000],
-        // space and anything unmapped → blank cell.
-        _ => [0; 7],
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn text_width_is_zero_for_empty_and_scales_with_length() {
-        assert_eq!(text_width(""), 0);
-        // One glyph: GLYPH_W*SCALE wide, no trailing gap.
-        assert_eq!(text_width("A"), GLYPH_W * SCALE);
-        // Each extra glyph adds one ADVANCE.
-        assert_eq!(text_width("AB"), GLYPH_W * SCALE + ADVANCE);
-    }
-
-    #[test]
     fn the_toast_message_fits_the_window() {
         let msg = "COPIED TO CLIPBOARD — PASTE IT";
         // Must fit between the accent dot and the right padding.
-        assert!(text_width(msg) <= WIDTH as i32 - 40 - 18, "toast text overflows the pill");
-    }
-
-    #[test]
-    fn glyph_lookup_folds_case_and_blanks_unknown() {
-        assert_eq!(glyph('a'), glyph('A'));
-        assert_ne!(glyph('A'), [0; 7]);
-        assert_eq!(glyph(' '), [0; 7]);
-        assert_eq!(glyph('~'), [0; 7]); // unmapped → blank
+        assert!(
+            font::text_width(msg) <= WIDTH as i32 - 40 - 18,
+            "toast text overflows the pill"
+        );
     }
 }
