@@ -26,6 +26,7 @@ mod icons;
 mod overlay;
 mod permissions;
 mod settings;
+mod speech;
 mod toast;
 
 use std::path::Path;
@@ -53,6 +54,7 @@ use winit::{
 };
 use overlay::Overlay;
 use settings::{SettingsAction, SettingsWindow, TtsHotkey};
+use speech::{SpeechController, SpeechStatus};
 use toast::Toast;
 
 /// How often the tray animation advances a frame.
@@ -87,6 +89,9 @@ enum UserEvent {
     /// egui asked for a repaint of the settings window after this delay
     /// (zero = now). Sent from the repaint callback installed on its Context.
     SettingsRepaint(Duration),
+    /// A read-aloud lifecycle transition from the speech worker (or the app),
+    /// driving the status popup. See `speech::SpeechController`.
+    Speech(SpeechStatus),
 }
 
 /// A successful transcription plus which provider produced it (for history).
@@ -121,8 +126,20 @@ struct App {
     tts_read_hotkey_id: Option<u32>,
     tts_read_clipboard_hotkey_id: Option<u32>,
     tts_stop_hotkey_id: Option<u32>,
-    /// Tray menu item IDs for the read-clipboard / stop-speaking actions.
+    /// Serialized read-aloud pipeline (one worker, epoch-cancelled). Lazily
+    /// spawned on first read-aloud — nothing on the launch path. `None` until
+    /// then. This replaced the old fire-and-forget per-utterance threads that
+    /// could overlap and crash AVFoundation (see `speech`).
+    speech: Option<SpeechController>,
+    /// The last text handed to read-aloud, so "Replay" can speak it again.
+    last_spoken: Option<String>,
+    /// TTS trigger ids currently held down, to debounce OS key auto-repeat
+    /// (repeated Pressed without an intervening Released) — single-shot actions
+    /// must fire once per physical press, like the PTT `ptt_held` guard.
+    tts_held: std::collections::HashSet<u32>,
+    /// Tray menu item IDs for the read-clipboard / replay / stop-speaking actions.
     read_clipboard_item_id: Option<MenuId>,
+    replay_item_id: Option<MenuId>,
     stop_speaking_item_id: Option<MenuId>,
     quit_item_id: Option<MenuId>,
     config_item_id: Option<MenuId>,
@@ -219,7 +236,11 @@ impl App {
             tts_read_hotkey_id: None,
             tts_read_clipboard_hotkey_id: None,
             tts_stop_hotkey_id: None,
+            speech: None,
+            last_spoken: None,
+            tts_held: std::collections::HashSet::new(),
             read_clipboard_item_id: None,
+            replay_item_id: None,
             stop_speaking_item_id: None,
             quit_item_id: None,
             config_item_id: None,
@@ -273,12 +294,14 @@ impl App {
         let config_item = MenuItem::new("Edit Settings (config.toml)…", true, None);
         let history_item = MenuItem::new("Open History Folder…", true, None);
         let read_clipboard_item = MenuItem::new("Read Clipboard Aloud", true, None);
+        let replay_item = MenuItem::new("Replay Last Reading", true, None);
         let stop_speaking_item = MenuItem::new("Stop Speaking", true, None);
         menu.append(&settings_item).expect("append settings item");
         menu.append(&config_item).expect("append config item");
         menu.append(&history_item).expect("append history item");
         menu.append(&PredefinedMenuItem::separator()).expect("separator");
         menu.append(&read_clipboard_item).expect("append read-clipboard item");
+        menu.append(&replay_item).expect("append replay item");
         menu.append(&stop_speaking_item).expect("append stop-speaking item");
         menu.append(&PredefinedMenuItem::separator()).expect("separator");
         let quit_item = MenuItem::new("Quit Holler", true, None);
@@ -287,6 +310,7 @@ impl App {
         self.config_item_id = Some(config_item.id().clone());
         self.history_item_id = Some(history_item.id().clone());
         self.read_clipboard_item_id = Some(read_clipboard_item.id().clone());
+        self.replay_item_id = Some(replay_item.id().clone());
         self.stop_speaking_item_id = Some(stop_speaking_item.id().clone());
         self.quit_item_id = Some(quit_item.id().clone());
 
@@ -411,27 +435,33 @@ impl App {
     }
 
     fn on_hotkey(&mut self, event: GlobalHotKeyEvent) {
-        // The TTS triggers fire on key-press only (single action, not a hold).
-        // Match them first; an unrecognised id falls through to the PTT handler.
-        if event.state == HotKeyState::Pressed {
-            if Some(event.id) == self.tts_read_hotkey_id {
-                self.read_selection_aloud();
-                return;
-            }
-            if Some(event.id) == self.tts_read_clipboard_hotkey_id {
-                self.read_clipboard_aloud();
-                return;
-            }
-            if Some(event.id) == self.tts_stop_hotkey_id {
-                self.stop_read_aloud();
-                return;
-            }
-        } else if Some(event.id) == self.tts_read_hotkey_id
+        // The TTS triggers are single-shot (fire once per physical press, not a
+        // hold). Match them first; an unrecognised id falls through to the PTT
+        // handler. `tts_held` debounces OS key auto-repeat so one hold can't
+        // queue a burst of overlapping read-aloud requests.
+        let is_tts = Some(event.id) == self.tts_read_hotkey_id
             || Some(event.id) == self.tts_read_clipboard_hotkey_id
-            || Some(event.id) == self.tts_stop_hotkey_id
-        {
-            // Release edge of a TTS trigger — nothing to do (not a hold).
-            return;
+            || Some(event.id) == self.tts_stop_hotkey_id;
+        if event.state == HotKeyState::Pressed {
+            if is_tts {
+                if !self.tts_held.insert(event.id) {
+                    return; // already held — auto-repeat; ignore.
+                }
+                if Some(event.id) == self.tts_read_hotkey_id {
+                    self.read_selection_aloud();
+                } else if Some(event.id) == self.tts_read_clipboard_hotkey_id {
+                    self.read_clipboard_aloud();
+                } else {
+                    self.stop_read_aloud();
+                }
+                return;
+            }
+        } else {
+            // Release edge: clear the hold guard. If it was a TTS trigger there's
+            // nothing else to do (not a press/release hold like PTT).
+            if self.tts_held.remove(&event.id) || is_tts {
+                return;
+            }
         }
 
         if Some(event.id) != self.ptt_hotkey_id {
@@ -1010,7 +1040,7 @@ impl App {
         match injector.copy_selection() {
             Some(text) => {
                 println!("[holler] read selection ({} chars)", text.len());
-                self.speak_text_off_thread(text);
+                self.start_speaking(text);
             }
             None => println!("[holler] read selection — nothing selected"),
         }
@@ -1026,45 +1056,99 @@ impl App {
         match text {
             Some(t) if !t.trim().is_empty() => {
                 println!("[holler] read clipboard ({} chars)", t.len());
-                self.speak_text_off_thread(t);
+                self.start_speaking(t);
             }
             _ => println!("[holler] read clipboard — clipboard is empty"),
         }
     }
 
-    /// Speak `text` via the read-selection provider on a worker thread. The
-    /// provider's `speak()` BLOCKS (it pumps a run loop), so it must never run on
-    /// the winit thread. To avoid overlapping utterances we `stop()` any in-flight
-    /// speech first — the provider re-arms its stop flag at the start of `speak()`,
-    /// so the new utterance plays cleanly. `Arc<dyn TtsProvider>` is `Send + Sync`.
-    fn speak_text_off_thread(&self, text: String) {
-        let Some(provider) = &self.read_tts else {
+    /// Lazily spawn the serialized speech worker on first read-aloud (nothing on
+    /// the launch path). Returns `None` only if there's no TTS provider — which
+    /// can't happen on macOS, where `build_tts` always yields at least Native.
+    fn ensure_speech(&mut self) -> Option<&mut SpeechController> {
+        if self.read_tts.is_none() {
+            eprintln!("[holler] read-aloud unavailable — no TTS provider");
+            return None;
+        }
+        if self.speech.is_none() {
+            self.speech = Some(SpeechController::spawn(self.proxy.clone()));
+        }
+        self.speech.as_mut()
+    }
+
+    /// Begin reading `text` aloud: remember it (for Replay), surface the
+    /// `Triggered` status immediately, and hand it to the serialized worker,
+    /// which cancels anything in flight. The worker drives the rest of the status
+    /// transitions back through the proxy. Blank text is a no-op.
+    fn start_speaking(&mut self, text: String) {
+        if text.trim().is_empty() {
+            return;
+        }
+        let Some(provider) = self.read_tts.as_ref().map(Arc::clone) else {
             eprintln!("[holler] read-aloud unavailable — no TTS provider");
             return;
         };
-        // Interrupt anything currently speaking so utterances don't overlap.
-        let _ = provider.stop();
-        let provider = Arc::clone(provider);
-        std::thread::Builder::new()
-            .name("holler-tts-speak".into())
-            .spawn(move || {
-                if let Err(e) = provider.speak(&text, &|_| {}) {
-                    eprintln!("[holler] read-aloud failed: {e}");
-                }
-            })
-            .expect("spawn tts speak thread");
+        self.last_spoken = Some(text.clone());
+        self.on_speech_status(SpeechStatus::Triggered);
+        if let Some(speech) = self.ensure_speech() {
+            speech.speak(text, provider);
+        }
     }
 
-    /// Stop the read-selection provider (hotkey + tray "Stop Speaking"). `stop()`
-    /// is `Send + Sync` and returns immediately — safe to call from the event
-    /// handler; the worker's poll loop sees the flag and halts at the next slice.
-    fn stop_read_aloud(&mut self) {
-        if let Some(provider) = &self.read_tts {
-            if let Err(e) = provider.stop() {
-                eprintln!("[holler] stop read-aloud failed: {e}");
-            } else {
-                println!("[holler] read-aloud stopped");
+    /// Replay the last utterance (popup ⟲ button / tray "Replay Last Reading").
+    /// No-op when nothing has been read aloud yet this session.
+    fn replay_last(&mut self) {
+        match self.last_spoken.clone() {
+            Some(text) => {
+                println!("[holler] replaying last reading ({} chars)", text.len());
+                self.start_speaking(text);
             }
+            None => println!("[holler] replay — nothing has been read aloud yet"),
+        }
+    }
+
+    /// Stop the in-flight read-aloud (hotkey / tray "Stop Speaking" / popup ◼).
+    /// Interrupts the worker and surfaces `Stopped` itself (the worker stays quiet
+    /// for a cancelled job). Falls back to a direct provider stop if the worker
+    /// was never spawned.
+    fn stop_read_aloud(&mut self) {
+        match &mut self.speech {
+            Some(speech) => {
+                speech.stop();
+                println!("[holler] read-aloud stopped");
+                self.on_speech_status(SpeechStatus::Stopped);
+            }
+            None => {
+                if let Some(provider) = &self.read_tts {
+                    let _ = provider.stop();
+                }
+            }
+        }
+    }
+
+    /// React to a read-aloud lifecycle transition. For now this logs and mirrors
+    /// the phase onto the tray tooltip; the interactive status popup hooks in
+    /// here next.
+    fn on_speech_status(&mut self, status: SpeechStatus) {
+        let label = match &status {
+            SpeechStatus::Triggered => "read-aloud: triggered",
+            SpeechStatus::Generating => "read-aloud: generating…",
+            SpeechStatus::Speaking => "read-aloud: speaking…",
+            SpeechStatus::Finished => "read-aloud: done",
+            SpeechStatus::Stopped => "read-aloud: stopped",
+            SpeechStatus::Error(e) => {
+                eprintln!("[holler] read-aloud error: {e}");
+                "read-aloud: error"
+            }
+        };
+        println!("[holler] {label}");
+        self.set_tray_tooltip(&format!("Holler — {label}"));
+        // A terminal status clears back to the default tooltip shortly after.
+        if matches!(
+            status,
+            SpeechStatus::Finished | SpeechStatus::Stopped | SpeechStatus::Error(_)
+        ) {
+            self.reset_tray_tooltip();
         }
     }
 
@@ -1310,6 +1394,8 @@ impl ApplicationHandler<UserEvent> for App {
                     open_in_os(folder.as_deref());
                 } else if self.read_clipboard_item_id.as_ref() == Some(&e.id) {
                     self.read_clipboard_aloud();
+                } else if self.replay_item_id.as_ref() == Some(&e.id) {
+                    self.replay_last();
                 } else if self.stop_speaking_item_id.as_ref() == Some(&e.id) {
                     self.stop_read_aloud();
                 } else if self.grant_access_item_id.as_ref() == Some(&e.id) {
@@ -1340,6 +1426,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 // A delay too large for Instant means "no repaint needed".
             }
+            UserEvent::Speech(status) => self.on_speech_status(status),
         }
     }
 
