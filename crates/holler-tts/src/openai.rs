@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::{load_key, SpeakPhase, TtsError, TtsProvider};
+use crate::{load_key, PreparedAudio, SpeakPhase, TtsError, TtsProvider};
 
 pub struct OpenAiTts {
     api_key: String,
@@ -178,6 +178,32 @@ impl TtsProvider for OpenAiTts {
 
     fn name(&self) -> &str {
         "openai"
+    }
+
+    // In-process AVFoundation playback is macOS-only, so prefetch (synthesize
+    // ahead, play later) is offered only there; elsewhere the trait defaults
+    // leave `can_prefetch()` false and the worker falls back to `speak`.
+    fn can_prefetch(&self) -> bool {
+        cfg!(target_os = "macos")
+    }
+
+    /// Pre-synthesize without playing — the network step of [`speak`](Self::speak)
+    /// on its own, so the worker can fetch the next batch while this one plays.
+    #[cfg(target_os = "macos")]
+    fn prepare(&self, text: &str) -> Result<PreparedAudio, TtsError> {
+        Ok(PreparedAudio::new(self.synthesize(text)?))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn play_prepared(
+        &self,
+        audio: PreparedAudio,
+        on_phase: &dyn Fn(SpeakPhase),
+    ) -> Result<(), TtsError> {
+        // Clear any stale stop request, mirroring `speak`'s re-arm semantics.
+        self.stop_requested.store(false, Ordering::SeqCst);
+        on_phase(SpeakPhase::Playing);
+        crate::playback::play_audio(audio.as_bytes(), &self.stop_requested)
     }
 }
 

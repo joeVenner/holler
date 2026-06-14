@@ -41,6 +41,24 @@ pub enum SpeakPhase {
     Playing,
 }
 
+/// Encoded audio (e.g. WAV bytes) synthesized by [`TtsProvider::prepare`] ahead
+/// of playback, so a caller can prefetch upcoming batches while the current one
+/// is still playing. Opaque: the bytes are produced and consumed by the same
+/// backend, and only [`TtsProvider::play_prepared`] interprets them.
+#[derive(Debug, Clone)]
+pub struct PreparedAudio(Vec<u8>);
+
+impl PreparedAudio {
+    /// Wrap raw encoded audio bytes.
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+    /// The encoded bytes, handed to the playback sink.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 /// Text-to-speech backends. Implementations must be `Send + Sync` so the app
 /// can hand an `Arc<dyn TtsProvider>` to a worker thread per utterance.
 pub trait TtsProvider: Send + Sync {
@@ -55,6 +73,40 @@ pub trait TtsProvider: Send + Sync {
     fn stop(&self) -> Result<(), TtsError>;
     /// Short label for logging/UI (e.g. "native").
     fn name(&self) -> &str;
+
+    /// Whether this backend can synthesize audio separately from playing it (via
+    /// [`prepare`](Self::prepare) + [`play_prepared`](Self::play_prepared)),
+    /// letting a caller prefetch the next batch while the current one plays.
+    /// Cloud backends can (each batch is a network round-trip worth hiding); the
+    /// in-process native voice cannot separate the two. Default: `false`.
+    fn can_prefetch(&self) -> bool {
+        false
+    }
+
+    /// Synthesize `text` to ready-to-play audio WITHOUT playing it. Only called
+    /// when [`can_prefetch`](Self::can_prefetch) is true. Safe to call from a
+    /// background prefetch thread concurrently with playback. Default: the
+    /// backend doesn't support pre-synthesis.
+    fn prepare(&self, text: &str) -> Result<PreparedAudio, TtsError> {
+        let _ = text;
+        Err(TtsError::Unsupported(
+            "this backend cannot pre-synthesize audio".into(),
+        ))
+    }
+
+    /// Play audio produced by [`prepare`](Self::prepare), blocking until playback
+    /// finishes or [`stop`](Self::stop) is called. `on_phase` reports
+    /// [`Playing`](SpeakPhase::Playing). Default: unsupported.
+    fn play_prepared(
+        &self,
+        audio: PreparedAudio,
+        on_phase: &dyn Fn(SpeakPhase),
+    ) -> Result<(), TtsError> {
+        let _ = (audio, on_phase);
+        Err(TtsError::Unsupported(
+            "this backend cannot play pre-synthesized audio".into(),
+        ))
+    }
 }
 
 /// Which TTS backend the app should build, parsed from config. Unknown values

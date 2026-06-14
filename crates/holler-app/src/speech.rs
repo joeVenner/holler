@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 
-use holler_tts::{SpeakPhase, TtsProvider};
+use holler_tts::{PreparedAudio, SpeakPhase, TtsError, TtsProvider};
 use winit::event_loop::EventLoopProxy;
 
 use crate::UserEvent;
