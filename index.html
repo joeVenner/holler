@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Holler — push-to-talk dictation for your agents</title>
+<meta name="description" content="Holler is a cross-platform, memory-efficient push-to-talk dictation app in Rust. Hold a key, speak, release — transcribe, paste at cursor, copy, and read text back aloud." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #161618;
+    --bg-2: #1c1c1e;
+    --card: #2c2c2e;
+    --card-2: #3a3a3c;
+    --ring: rgba(255,255,255,0.08);
+    --text: #ebebf0;
+    --muted: #9a9aa2;
+    --blue: #409cff;
+    --red: #ff453a;
+    --orange: #ff9f0a;
+    --green: #30d158;
+    --radius: 16px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--blue); text-decoration: none; }
+  code, pre { font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 24px; }
+
+  /* Nav */
+  nav {
+    position: sticky; top: 0; z-index: 10;
+    backdrop-filter: saturate(180%) blur(20px);
+    background: rgba(22,22,24,0.72);
+    border-bottom: 1px solid var(--ring);
+  }
+  nav .wrap { display: flex; align-items: center; justify-content: space-between; height: 60px; }
+  .brand { font-weight: 800; font-size: 18px; letter-spacing: -0.02em; }
+  .brand span { color: var(--blue); }
+  .nav-links { display: flex; gap: 26px; align-items: center; }
+  .nav-links a { color: var(--muted); font-size: 14px; font-weight: 500; }
+  .nav-links a:hover { color: var(--text); }
+  @media (max-width: 720px) { .nav-links a:not(.btn) { display: none; } }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 10px 18px; border-radius: 980px; font-weight: 600; font-size: 14px;
+    transition: transform .12s ease, background .12s ease;
+  }
+  .btn:hover { transform: translateY(-1px); }
+  .btn-primary { background: var(--blue); color: #fff; }
+  .btn-ghost { background: var(--card); color: var(--text); border: 1px solid var(--ring); }
+
+  /* Hero */
+  .hero { text-align: center; padding: 96px 0 72px; position: relative; overflow: hidden; }
+  .hero::before {
+    content: ""; position: absolute; inset: -40% 0 auto 0; height: 520px;
+    background: radial-gradient(ellipse at 50% 0%, rgba(64,156,255,0.18), transparent 60%);
+    pointer-events: none;
+  }
+  .pill {
+    display: inline-flex; align-items: center; gap: 8px; margin-bottom: 22px;
+    padding: 6px 14px; border-radius: 980px; background: var(--card);
+    border: 1px solid var(--ring); font-size: 13px; color: var(--muted); font-weight: 500;
+  }
+  .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 10px var(--green); }
+  h1 { font-size: clamp(40px, 7vw, 68px); line-height: 1.04; letter-spacing: -0.03em; font-weight: 800; }
+  h1 .grad { background: linear-gradient(120deg, #409cff, #30d158); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .lead { max-width: 660px; margin: 22px auto 34px; font-size: 19px; color: var(--muted); }
+  .hero-cta { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+
+  .demo {
+    max-width: 560px; margin: 56px auto 0; background: var(--bg-2);
+    border: 1px solid var(--ring); border-radius: var(--radius); padding: 18px 20px;
+    display: flex; align-items: center; gap: 14px; text-align: left;
+    box-shadow: 0 24px 60px rgba(0,0,0,0.45);
+  }
+  .demo .rec { width: 14px; height: 14px; border-radius: 50%; background: var(--red); box-shadow: 0 0 14px var(--red); flex: none; animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: .5; } 50% { opacity: 1; } }
+  .demo .bars { display: flex; gap: 3px; align-items: center; height: 28px; flex: 1; }
+  .demo .bars i { width: 3px; background: linear-gradient(var(--blue), #4a6080); border-radius: 2px; display: block; animation: eq 1.1s ease-in-out infinite; }
+  @keyframes eq { 0%,100% { height: 6px; } 50% { height: 26px; } }
+  .demo .kbd { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--muted); white-space: nowrap; }
+
+  /* Sections */
+  section { padding: 64px 0; }
+  .eyebrow { color: var(--blue); font-weight: 600; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; }
+  h2 { font-size: clamp(28px, 4vw, 38px); letter-spacing: -0.02em; margin: 10px 0 8px; font-weight: 700; }
+  .section-sub { color: var(--muted); max-width: 620px; font-size: 17px; }
+
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-top: 40px; }
+  @media (max-width: 860px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--card); border: 1px solid var(--ring); border-radius: var(--radius);
+    padding: 24px; transition: transform .15s ease, border-color .15s ease;
+  }
+  .card:hover { transform: translateY(-3px); border-color: rgba(255,255,255,0.16); }
+  .card .ic { font-size: 26px; }
+  .card h3 { font-size: 17px; margin: 14px 0 6px; font-weight: 600; }
+  .card p { color: var(--muted); font-size: 14.5px; }
+
+  /* Spotlight */
+  .spotlight {
+    background: linear-gradient(180deg, var(--bg-2), var(--bg));
+    border: 1px solid var(--ring); border-radius: 24px; padding: 48px;
+    display: grid; grid-template-columns: 1.1fr 1fr; gap: 40px; align-items: center;
+  }
+  @media (max-width: 760px) { .spotlight { grid-template-columns: 1fr; padding: 32px; } }
+  .spotlight ul { list-style: none; margin-top: 18px; }
+  .spotlight li { padding: 8px 0 8px 28px; position: relative; color: var(--muted); }
+  .spotlight li::before { content: "✓"; position: absolute; left: 0; color: var(--green); font-weight: 700; }
+  .spotlight li b { color: var(--text); font-weight: 600; }
+  .batch { display: flex; flex-direction: column; gap: 10px; }
+  .batch .b { background: var(--card); border: 1px solid var(--ring); border-radius: 12px; padding: 12px 16px; display: flex; align-items: center; gap: 12px; font-size: 13px; }
+  .batch .b .tag { font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 3px 8px; border-radius: 6px; }
+  .tag.playing { background: rgba(48,209,88,0.16); color: var(--green); }
+  .tag.ready { background: rgba(64,156,255,0.16); color: var(--blue); }
+  .tag.fetch { background: rgba(255,159,10,0.16); color: var(--orange); }
+  .tag.idle { background: var(--card-2); color: var(--muted); }
+
+  /* Code */
+  pre {
+    background: var(--bg-2); border: 1px solid var(--ring); border-radius: var(--radius);
+    padding: 22px 24px; overflow-x: auto; font-size: 13.5px; line-height: 1.7; margin-top: 28px;
+  }
+  pre .c { color: #6f7079; }
+  pre .p { color: var(--green); }
+
+  /* Roadmap */
+  .road { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin-top: 36px; }
+  @media (max-width: 640px) { .road { grid-template-columns: 1fr; } }
+  .road .item { background: var(--card); border: 1px solid var(--ring); border-radius: 12px; padding: 18px 20px; }
+  .road .item h4 { font-size: 15px; font-weight: 600; }
+  .road .item p { color: var(--muted); font-size: 13.5px; margin-top: 4px; }
+  .cta-band { text-align: center; margin-top: 44px; }
+
+  footer { border-top: 1px solid var(--ring); padding: 40px 0; color: var(--muted); font-size: 14px; }
+  footer .wrap { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 14px; }
+  footer a { color: var(--muted); }
+  footer a:hover { color: var(--text); }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <div class="brand">🗣️ Holler<span>.</span></div>
+    <div class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#readaloud">Read-aloud</a>
+      <a href="#start">Quick start</a>
+      <a href="#contribute">Contribute</a>
+      <a class="btn btn-ghost" href="https://github.com/joeVenner/holler">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="pill"><span class="dot"></span> v0.5.0 · macOS &amp; Windows · Rust</div>
+    <h1>Hold a key. Speak.<br /><span class="grad">Your words, everywhere.</span></h1>
+    <p class="lead">Holler is a cross-platform, memory-efficient <b>push-to-talk dictation</b> app — a walkie-talkie for your agents. Release the key and your speech is transcribed, injected at the cursor, copied to the clipboard, and saved to a searchable local history. It reads text back aloud, too.</p>
+    <div class="hero-cta">
+      <a class="btn btn-primary" href="https://github.com/joeVenner/holler/releases/latest">Get the latest release</a>
+      <a class="btn btn-ghost" href="https://github.com/joeVenner/holler">View on GitHub</a>
+    </div>
+    <div class="demo">
+      <span class="rec"></span>
+      <div class="bars">
+        <i style="animation-delay:0s"></i><i style="animation-delay:.1s"></i><i style="animation-delay:.25s"></i>
+        <i style="animation-delay:.15s"></i><i style="animation-delay:.35s"></i><i style="animation-delay:.05s"></i>
+        <i style="animation-delay:.3s"></i><i style="animation-delay:.2s"></i><i style="animation-delay:.4s"></i>
+        <i style="animation-delay:.12s"></i><i style="animation-delay:.28s"></i><i style="animation-delay:.08s"></i>
+      </div>
+      <span class="kbd">⌃⌥Space — listening…</span>
+    </div>
+  </div>
+</header>
+
+<section id="features">
+  <div class="wrap">
+    <div class="eyebrow">Everything in one menubar app</div>
+    <h2>Great features, no bloat</h2>
+    <p class="section-sub">Native, lightweight, and privacy-first — with pluggable providers you swap by config.</p>
+    <div class="grid">
+      <div class="card"><div class="ic">🎙️</div><h3>Push-to-talk dictation</h3><p>Hold <code>⌃⌥Space</code>, speak, release. Text lands at your cursor, on the clipboard, and in history.</p></div>
+      <div class="card"><div class="ic">🔌</div><h3>Bring-your-own-key STT</h3><p>Pluggable transcription — <b>Deepgram</b> (nova-3) and <b>OpenAI</b>, selectable per config.</p></div>
+      <div class="card"><div class="ic">🔊</div><h3>Read-aloud</h3><p>Read your selection or clipboard aloud — offline native voice or cloud OpenAI / Deepgram, with replay &amp; stop.</p></div>
+      <div class="card"><div class="ic">🪟</div><h3>Native overlays</h3><p>A recording pill with a live level meter, a read-aloud status popup, and a clipboard toast — CPU-rendered, no WebView.</p></div>
+      <div class="card"><div class="ic">⚙️</div><h3>Settings UI</h3><p>An on-demand window to pick providers, voices, injection mode, and rebind hotkeys live — no restart.</p></div>
+      <div class="card"><div class="ic">🗂️</div><h3>Searchable history</h3><p>Every transcript saved to a local SQLite database that you own and can search.</p></div>
+      <div class="card"><div class="ic">🔐</div><h3>Privacy-first keys</h3><p>API keys live in a separate <code>secrets.toml</code> (0600), never in your shareable config. Env overrides supported.</p></div>
+      <div class="card"><div class="ic">🪶</div><h3>Memory-efficient</h3><p><code>mimalloc</code>, models loaded only during a session, event-driven hotkeys, LTO + strip release builds.</p></div>
+      <div class="card"><div class="ic">🖥️</div><h3>Cross-platform</h3><p>macOS &amp; Windows today — paste-or-type injection with a graceful clipboard fallback.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="readaloud">
+  <div class="wrap">
+    <div class="spotlight">
+      <div>
+        <div class="eyebrow">Read-aloud, done right</div>
+        <h2>Fast on long text — and it never breaks</h2>
+        <p class="section-sub">Paste a wall of text and it just works.</p>
+        <ul>
+          <li><b>Whitespace cleanup</b> — double spaces and stray tabs from terminal copies are normalized before synthesis.</li>
+          <li><b>Sentence batching</b> — long text is split into bite-sized batches, so the first audio starts almost instantly.</li>
+          <li><b>Lazy prefetch</b> — cloud voices synthesize the next batches while the current one plays — no gaps.</li>
+          <li><b>Stops when you do</b> — quit early and Holler stops fetching audio you'll never hear.</li>
+        </ul>
+      </div>
+      <div class="batch" aria-hidden="true">
+        <div class="b"><span class="tag playing">▶ batch 1</span> playing now…</div>
+        <div class="b"><span class="tag ready">✓ batch 2</span> ready in buffer</div>
+        <div class="b"><span class="tag fetch">↓ batch 3</span> prefetching…</div>
+        <div class="b"><span class="tag idle">• batch 4</span> waiting</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="start">
+  <div class="wrap">
+    <div class="eyebrow">Up and running in a minute</div>
+    <h2>Quick start — macOS</h2>
+    <pre><span class="c"># 1. Build a double-clickable app bundle (release + sign)</span>
+scripts/bundle-macos.sh
+
+<span class="c"># 2. Store your Deepgram API key (one time)</span>
+./Holler.app/Contents/MacOS/holler set-key deepgram <span class="p">&lt;YOUR_KEY&gt;</span>
+
+<span class="c"># 3. Launch it (menubar agent — no Dock icon)</span>
+open ./Holler.app</pre>
+    <p class="section-sub" style="margin-top:20px">Grant <b>Accessibility</b> (to paste at the cursor) and <b>Microphone</b> on first launch, then hold <code>⌃⌥Space</code> and talk. Windows builds ship as a self-contained ZIP — see the <a href="https://github.com/joeVenner/holler#quick-start-windows">README</a>.</p>
+  </div>
+</section>
+
+<section id="contribute">
+  <div class="wrap">
+    <div class="eyebrow">Open source · MIT / Apache-2.0</div>
+    <h2>Built in the open — come help</h2>
+    <p class="section-sub">Holler is actively developed and contributions are welcome. A few places we'd love a hand:</p>
+    <div class="road">
+      <div class="item"><h4>🪟 Windows read-aloud</h4><p>A Windows TTS backend + selection capture (read-aloud is macOS-only today).</p></div>
+      <div class="item"><h4>🔊 Cross-platform cloud TTS</h4><p>An audio sink so cloud voices play on Windows/Linux, not just macOS.</p></div>
+      <div class="item"><h4>🧠 Offline local STT</h4><p>A <code>whisper-rs</code> provider (large-v3-turbo, download-on-demand) — dictation with no network, no key.</p></div>
+      <div class="item"><h4>✨ LLM cleanup modes</h4><p>An optional raw / cleaned / formatted pass behind an <code>LlmProvider</code> trait.</p></div>
+      <div class="item"><h4>🐧 Linux support</h4><p>Audio, injection, and overlay backends for X11/Wayland.</p></div>
+      <div class="item"><h4>🙌 Polish &amp; docs</h4><p>Voices, settings UX, overlay layouts, and documentation are all fair game.</p></div>
+    </div>
+    <div class="cta-band">
+      <a class="btn btn-primary" href="https://github.com/joeVenner/holler/blob/main/CONTRIBUTING.md">Read the contributing guide</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div>🗣️ <b>Holler</b> — push-to-talk dictation for your agents.</div>
+    <div>
+      <a href="https://github.com/joeVenner/holler">GitHub</a> ·
+      <a href="https://github.com/joeVenner/holler/releases">Releases</a> ·
+      <a href="https://github.com/joeVenner/holler/blob/main/CONTRIBUTING.md">Contributing</a> ·
+      <a href="https://github.com/joeVenner/holler#license">MIT / Apache-2.0</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
