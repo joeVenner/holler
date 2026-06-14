@@ -1,100 +1,97 @@
-//! Shared 5×7 bitmap font for the softbuffer overlays (the clipboard toast and
-//! the read-aloud status popup). Uppercase A–Z plus the punctuation those
-//! overlays need; lowercase folds to uppercase and anything unmapped renders
-//! blank. Extracted from `toast.rs` so multiple overlays draw text identically
-//! without duplicating the glyph table — egui would need a GL context for a
-//! momentary overlay, and `ab_glyph` an embedded TTF; a fixed bitmap font stays
-//! the leaner, self-contained choice (docs/DISCOVERIES.md, 2026-06-12).
+//! Shared text rendering for the softbuffer overlays (the recording pill, the
+//! read-aloud status popup, and the clipboard toast).
+//!
+//! Glyphs are rasterized from the **embedded Inter** typeface (`assets/Inter.ttf`,
+//! SIL OFL — see `assets/Inter-OFL.txt`) via `ab_glyph`, anti-aliased into the
+//! XRGB softbuffer. This replaces the original hand-rolled 5×7 bitmap font: a
+//! real proportional face with coverage AA is what makes the overlays read as a
+//! modern macOS surface rather than a fixed-cell terminal (docs/DISCOVERIES.md,
+//! 2026-06-13). `ab_glyph` is already in the tree (egui pulls it transitively),
+//! and the font parses once into a process-wide `OnceLock`, so per-frame redraws
+//! just walk cached glyph outlines.
+
+use std::sync::OnceLock;
+
+use ab_glyph::{point, Font, FontRef, PxScale, ScaleFont};
 
 use crate::overlay::{blend, Rgb};
 
-/// Pixel scale of one glyph cell: a 5×7 glyph renders at 10×14 px.
-pub const SCALE: i32 = 2;
-pub const GLYPH_W: i32 = 5;
-pub const GLYPH_H: i32 = 7;
-/// Horizontal advance per glyph: the cell plus one blank column.
-pub const ADVANCE: i32 = (GLYPH_W + 1) * SCALE;
+/// The embedded variable Inter face; `ab_glyph` renders its default (Regular)
+/// master, which is the weight we want for UI chrome.
+static FONT_BYTES: &[u8] = include_bytes!("../assets/Inter.ttf");
 
-/// Total rendered pixel width of `msg` (no trailing inter-glyph gap).
+/// Render size in pixels. Inter at 15px gives a crisp, legible label that fits
+/// comfortably inside the ~56–72px-tall overlay pills.
+pub const SIZE_PX: f32 = 15.0;
+
+/// Parse the embedded font once and hand back a shared reference.
+fn font() -> &'static FontRef<'static> {
+    static FONT: OnceLock<FontRef<'static>> = OnceLock::new();
+    FONT.get_or_init(|| {
+        FontRef::try_from_slice(FONT_BYTES).expect("embedded Inter font must parse")
+    })
+}
+
+/// Height (px) of one line of text at [`SIZE_PX`] — ascent over descent. Used by
+/// the overlays to vertically centre a label inside a pill.
+pub fn text_height() -> i32 {
+    let scaled = font().as_scaled(PxScale::from(SIZE_PX));
+    (scaled.ascent() - scaled.descent()).round() as i32
+}
+
+/// Total advance width (px) of `msg` at [`SIZE_PX`], including kerning. Zero for
+/// the empty string.
 pub fn text_width(msg: &str) -> i32 {
-    let n = msg.chars().count() as i32;
-    if n == 0 {
-        0
-    } else {
-        n * ADVANCE - SCALE
-    }
-}
-
-/// Draw `msg` as scaled 5×7 glyphs with top-left at `(x0, y0)` into a `buf_w`×
-/// `buf_h` XRGB buffer. Pixels outside the buffer are clipped.
-pub fn draw_text(buf: &mut [u32], buf_w: i32, buf_h: i32, x0: i32, y0: i32, msg: &str, col: Rgb) {
-    let mut x = x0;
+    let scaled = font().as_scaled(PxScale::from(SIZE_PX));
+    let mut width = 0.0;
+    let mut prev = None;
     for ch in msg.chars() {
-        let g = glyph(ch);
-        for (row, bits) in g.iter().enumerate() {
-            for c in 0..GLYPH_W {
-                if (bits >> (GLYPH_W - 1 - c)) & 1 == 1 {
-                    fill_cell(buf, buf_w, buf_h, x + c * SCALE, y0 + row as i32 * SCALE, col);
-                }
-            }
+        let id = scaled.glyph_id(ch);
+        if let Some(p) = prev {
+            width += scaled.kern(p, id);
         }
-        x += ADVANCE;
+        width += scaled.h_advance(id);
+        prev = Some(id);
+    }
+    width.ceil() as i32
+}
+
+/// Draw `msg` with the text block's top-left at `(x0, y0)` into a `buf_w`×`buf_h`
+/// XRGB buffer, anti-aliased in `col`. The baseline is derived from the font's
+/// ascent so the same `(x0, y0)` convention as the old bitmap font still holds.
+/// Pixels outside the buffer are clipped.
+pub fn draw_text(buf: &mut [u32], buf_w: i32, buf_h: i32, x0: i32, y0: i32, msg: &str, col: Rgb) {
+    let font = font();
+    let scaled = font.as_scaled(PxScale::from(SIZE_PX));
+    let baseline = y0 as f32 + scaled.ascent();
+    let mut caret = x0 as f32;
+    let mut prev = None;
+    for ch in msg.chars() {
+        let id = font.glyph_id(ch);
+        if let Some(p) = prev {
+            caret += scaled.kern(p, id);
+        }
+        let glyph = id.with_scale_and_position(SIZE_PX, point(caret, baseline));
+        if let Some(outline) = font.outline_glyph(glyph) {
+            let bounds = outline.px_bounds();
+            let ox = bounds.min.x as i32;
+            let oy = bounds.min.y as i32;
+            outline.draw(|gx, gy, coverage| {
+                blend_px(buf, buf_w, buf_h, ox + gx as i32, oy + gy as i32, col, coverage);
+            });
+        }
+        caret += scaled.h_advance(id);
+        prev = Some(id);
     }
 }
 
-/// Fill one `SCALE`×`SCALE` font cell (crisp, full coverage).
-fn fill_cell(buf: &mut [u32], buf_w: i32, buf_h: i32, px: i32, py: i32, col: Rgb) {
-    for dy in 0..SCALE {
-        for dx in 0..SCALE {
-            put(buf, buf_w, buf_h, px + dx, py + dy, col);
-        }
-    }
-}
-
-/// Opaque pixel write addressed by coordinate, bounds-checked against the buffer.
-fn put(buf: &mut [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, col: Rgb) {
+/// Alpha-composite `col` at `(x, y)` with coverage `a`, bounds-checked to the
+/// `buf_w`×`buf_h` buffer.
+fn blend_px(buf: &mut [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, col: Rgb, a: f32) {
     if x < 0 || y < 0 || x >= buf_w || y >= buf_h {
         return;
     }
-    blend(buf, (y * buf_w + x) as usize, col, 1.0);
-}
-
-/// 5×7 uppercase bitmap font (each row is 5 bits, MSB = leftmost column).
-fn glyph(ch: char) -> [u8; 7] {
-    match ch.to_ascii_uppercase() {
-        'A' => [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
-        'B' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110],
-        'C' => [0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110],
-        'D' => [0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110],
-        'E' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
-        'F' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000],
-        'G' => [0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111],
-        'H' => [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
-        'I' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111],
-        'J' => [0b00111, 0b00010, 0b00010, 0b00010, 0b10010, 0b10010, 0b01100],
-        'K' => [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001],
-        'L' => [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111],
-        'M' => [0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001],
-        'N' => [0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001],
-        'O' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
-        'P' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000],
-        'Q' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101],
-        'R' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001],
-        'S' => [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110],
-        'T' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100],
-        'U' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
-        'V' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100],
-        'W' => [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001],
-        'X' => [0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001],
-        'Y' => [0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100],
-        'Z' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111],
-        // Dash / em-dash: a single mid-height bar.
-        '-' | '—' => [0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000],
-        '.' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00100],
-        '\'' => [0b00100, 0b00100, 0b00100, 0b00000, 0b00000, 0b00000, 0b00000],
-        // space and anything unmapped → blank cell.
-        _ => [0; 7],
-    }
+    blend(buf, (y * buf_w + x) as usize, col, a);
 }
 
 #[cfg(test)]
@@ -102,24 +99,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn text_width_is_zero_for_empty_and_scales_with_length() {
+    fn embedded_font_parses() {
+        // A panic here means the asset is missing/corrupt at build time.
+        let _ = font();
+        assert!(text_height() > 0);
+    }
+
+    #[test]
+    fn text_width_is_zero_for_empty_and_grows_with_length() {
         assert_eq!(text_width(""), 0);
-        assert_eq!(text_width("A"), GLYPH_W * SCALE);
-        assert_eq!(text_width("AB"), GLYPH_W * SCALE + ADVANCE);
+        assert!(text_width("WW") > text_width("W"));
+        assert!(text_width("W") > 0);
     }
 
     #[test]
-    fn glyph_lookup_folds_case_and_blanks_unknown() {
-        assert_eq!(glyph('a'), glyph('A'));
-        assert_ne!(glyph('A'), [0; 7]);
-        assert_eq!(glyph(' '), [0; 7]);
-        assert_eq!(glyph('~'), [0; 7]);
-    }
+    fn draw_text_writes_pixels_and_clips_to_buffer() {
+        // Into a real buffer: at least one pixel should be touched.
+        let (w, h) = (80, 24);
+        let mut buf = vec![0u32; (w * h) as usize];
+        draw_text(&mut buf, w, h, 2, 2, "Hi", (255, 255, 255));
+        assert!(buf.iter().any(|&p| p != 0), "draw_text painted nothing");
 
-    #[test]
-    fn draw_text_clips_to_buffer_without_panicking() {
         // A 1-px buffer must absorb a multi-glyph string via bounds checks.
-        let mut buf = [0u32; 1];
-        draw_text(&mut buf, 1, 1, 0, 0, "HELLO", (255, 255, 255));
+        let mut tiny = [0u32; 1];
+        draw_text(&mut tiny, 1, 1, 0, 0, "Speaking", (255, 255, 255));
     }
 }

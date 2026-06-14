@@ -1669,6 +1669,7 @@ checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 name = "holler-app"
 version = "0.4.0"
 dependencies = [
+ "ab_glyph",
  "arboard",
  "block2 0.6.2",
  "egui",
