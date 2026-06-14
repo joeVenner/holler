@@ -28,11 +28,12 @@ pub const HEIGHT: u32 = 56;
 /// Seconds the toast stays on screen before auto-dismissing.
 pub const VISIBLE_SECS: u64 = 4;
 
+// Palette — matches the recording overlay / status popup (macOS dark material).
 const BG: Rgb = (18, 18, 20);
-const PILL: Rgb = (40, 40, 46);
-const RING: Rgb = (70, 70, 80);
-const TEXT: Rgb = (224, 224, 230);
-const ACCENT: Rgb = (96, 174, 255); // small left dot, echoes the overlay meter
+const PILL: Rgb = (44, 44, 46);
+const RING: Rgb = (72, 72, 76);
+const TEXT: Rgb = (235, 235, 240); // Apple primary label
+const ACCENT: Rgb = (64, 156, 255); // small left dot, echoes the overlay meter
 
 /// Owns the toast window and its softbuffer surface. Created once (hidden) and
 /// shown on demand — the same resident-but-hidden model as the overlay.

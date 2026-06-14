@@ -37,14 +37,16 @@ pub enum Phase {
 /// Shared with the toast renderer (`toast.rs`), which reuses the paint helpers.
 pub(crate) type Rgb = (u8, u8, u8);
 
+// Palette tuned to macOS dark-mode materials + system colours, shared in spirit
+// with the toast and status popup so the three overlays read as one surface.
 const BG: Rgb = (18, 18, 20); // window backdrop / pill corners (near-black)
-const PILL: Rgb = (34, 34, 39); // the rounded card
-const RING: Rgb = (66, 66, 74); // its subtle outline
-const REC: Rgb = (255, 69, 58); // Apple red, recording dot
+const PILL: Rgb = (44, 44, 46); // the rounded card — macOS dark popover material
+const RING: Rgb = (72, 72, 76); // its subtle outline
+const REC: Rgb = (255, 69, 58); // systemRed, recording dot
 const REC_DIM: Rgb = (140, 38, 32);
-const WAVE_HI: Rgb = (96, 174, 255); // loud sample
+const WAVE_HI: Rgb = (64, 156, 255); // loud sample — toward systemBlue
 const WAVE_LO: Rgb = (74, 96, 128); // quiet sample
-const PROC: Rgb = (255, 179, 64); // amber dot while transcribing
+const PROC: Rgb = (255, 159, 10); // systemOrange dot while transcribing
 const PROC_SWEEP: Rgb = (150, 188, 235);
 
 /// Geometry shared by the dot and meter (logical px, origin top-left).

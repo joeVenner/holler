@@ -30,20 +30,20 @@ pub const HEIGHT: u32 = 66;
 pub const DONE_DWELL_SECS: u64 = 2;
 pub const ERROR_DWELL_SECS: u64 = 4;
 
-// Palette — shares the overlay's dark-pill look.
+// Palette — macOS dark-mode material + system colours, matching the overlay.
 const BG: Rgb = (18, 18, 20);
-const PILL: Rgb = (34, 34, 39);
-const RING: Rgb = (66, 66, 74);
-const TEXT: Rgb = (224, 224, 230);
-const AMBER: Rgb = (255, 179, 64);
-const BLUE: Rgb = (120, 180, 255);
-const GREEN: Rgb = (120, 210, 140);
-const GREY: Rgb = (170, 170, 178);
-const RED: Rgb = (255, 99, 90);
-const BTN_BG: Rgb = (52, 52, 60);
-const BTN_BG_HOVER: Rgb = (78, 78, 92);
-const BTN_BG_OFF: Rgb = (28, 28, 32);
-const ICON_OFF: Rgb = (96, 96, 104);
+const PILL: Rgb = (44, 44, 46); // dark popover material
+const RING: Rgb = (72, 72, 76);
+const TEXT: Rgb = (235, 235, 240); // Apple primary label
+const AMBER: Rgb = (255, 159, 10); // systemOrange
+const BLUE: Rgb = (64, 156, 255); // toward systemBlue
+const GREEN: Rgb = (48, 209, 88); // systemGreen
+const GREY: Rgb = (152, 152, 157); // systemGray
+const RED: Rgb = (255, 69, 58); // systemRed
+const BTN_BG: Rgb = (58, 58, 62);
+const BTN_BG_HOVER: Rgb = (86, 86, 92);
+const BTN_BG_OFF: Rgb = (36, 36, 38);
+const ICON_OFF: Rgb = (110, 110, 116);
 
 // Geometry (logical px, origin top-left).
 const CY: f32 = HEIGHT as f32 / 2.0;
