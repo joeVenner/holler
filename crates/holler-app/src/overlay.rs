@@ -39,7 +39,6 @@ pub(crate) type Rgb = (u8, u8, u8);
 
 // Palette tuned to macOS dark-mode materials + system colours, shared in spirit
 // with the toast and status popup so the three overlays read as one surface.
-const BG: Rgb = (18, 18, 20); // window backdrop / pill corners (near-black)
 const PILL: Rgb = (44, 44, 46); // the rounded card — macOS dark popover material
 const RING: Rgb = (72, 72, 76); // its subtle outline
 const REC: Rgb = (255, 69, 58); // systemRed, recording dot
@@ -99,6 +98,9 @@ impl Overlay {
             .with_decorations(false)
             .with_resizable(false)
             .with_window_level(WindowLevel::AlwaysOnTop)
+            // Let the rounded pill float free of a backing rectangle (macOS
+            // shapes the layer in make_pill_window below).
+            .with_transparent(true)
             .with_visible(false);
 
         // Windows-only parity with the macOS ornamental overlay: keep it out of
@@ -114,6 +116,7 @@ impl Overlay {
         let window = Arc::new(event_loop.create_window(attrs).ok()?);
         let ctx = Context::new(window.clone()).ok()?;
         let surface = Surface::new(&ctx, window.clone()).ok()?;
+        make_pill_window(&window, HEIGHT as f64 / 2.0);
 
         Some(Self {
             window,
@@ -175,19 +178,17 @@ fn paint(buf: &mut [u32], phase: Phase, frame: usize, levels: &VecDeque<f32>) {
     let half_h = h as f32 / 2.0 - 1.5;
     let radius = half_h; // full-height pill
 
-    // Backdrop, then the rounded card with an AA outline, computed per pixel
-    // from a signed distance field (24k px — trivial at the overlay's framerate).
+    // Fill the whole buffer with the pill colour — the window's layer is rounded
+    // + clipped (make_pill_window) so the rectangle's corners never show, which
+    // is why there's no dark backdrop to paint here. A signed-distance field
+    // still draws the subtle AA outline hugging the rounded edge, and doubles as
+    // a graceful fallback (a same-colour rounded card) if the layer clip is
+    // unavailable.
     for y in 0..h {
         for x in 0..w {
             let idx = (y * w + x) as usize;
-            buf[idx] = pack(BG);
+            buf[idx] = pack(PILL);
             let sd = sd_round_rect(x as f32 + 0.5 - cx, y as f32 + 0.5 - cy, half_w, half_h, radius);
-            // Fill: coverage = how far inside the edge this pixel sits.
-            let fill = (0.5 - sd).clamp(0.0, 1.0);
-            if fill > 0.0 {
-                blend(buf, idx, PILL, fill);
-            }
-            // Outline: a ~1 px band hugging the edge from the inside.
             let ring = (1.0 - (sd + 1.2).abs()).clamp(0.0, 1.0);
             if ring > 0.0 {
                 blend(buf, idx, RING, ring * 0.9);
@@ -306,6 +307,57 @@ pub(crate) fn pack((r, g, b): Rgb) -> u32 {
     ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
 }
 
+/// macOS: turn a borderless softbuffer window into a **floating rounded pill** —
+/// the window is made non-opaque with a clear background and its layer is
+/// rounded + clipped, so the rectangle's corners disappear and only the pill
+/// shows (with a soft drop shadow). softbuffer can't do per-pixel alpha, so this
+/// layer-clip is the way to drop the dark backing rectangle behind the pill.
+///
+/// Best-effort and side-effect-only: any failure just leaves the window a plain
+/// rectangle (no worse than before). `corner_radius` is in logical points — pass
+/// half the pill height for a full capsule. No-op off macOS.
+#[cfg(target_os = "macos")]
+pub(crate) fn make_pill_window(window: &Window, corner_radius: f64) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    let view: *mut AnyObject = appkit.ns_view.as_ptr().cast();
+    if view.is_null() {
+        return;
+    }
+    // SAFETY: `view` is the live NSView backing this winit window; every selector
+    // below is a standard AppKit method with the signature we annotate. The
+    // calls only mutate presentation state and are made on the main (UI) thread,
+    // where window creation already runs.
+    unsafe {
+        let _: () = msg_send![view, setWantsLayer: true];
+        let layer: *mut AnyObject = msg_send![view, layer];
+        if !layer.is_null() {
+            let _: () = msg_send![layer, setCornerRadius: corner_radius];
+            let _: () = msg_send![layer, setMasksToBounds: true];
+        }
+        let ns_window: *mut AnyObject = msg_send![view, window];
+        if !ns_window.is_null() {
+            let _: () = msg_send![ns_window, setOpaque: false];
+            let color_cls = objc2::class!(NSColor);
+            let clear: *mut AnyObject = msg_send![color_cls, clearColor];
+            let _: () = msg_send![ns_window, setBackgroundColor: clear];
+            let _: () = msg_send![ns_window, setHasShadow: true];
+        }
+    }
+}
+
+/// No-op on non-macOS hosts (the overlays stay rectangular there for now).
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn make_pill_window(_window: &Window, _corner_radius: f64) {}
+
 /// Linear interpolate between two colours; `t` clamped to `[0, 1]`.
 fn lerp_rgb(a: Rgb, b: Rgb, t: f32) -> Rgb {
     let t = t.clamp(0.0, 1.0);
@@ -360,7 +412,7 @@ mod tests {
 
     #[test]
     fn full_coverage_blend_replaces_destination() {
-        let mut buf = [pack(BG)];
+        let mut buf = [pack(PILL)];
         blend(&mut buf, 0, REC, 1.0);
         assert_eq!(buf[0], pack(REC));
         // Zero coverage leaves the destination untouched.
