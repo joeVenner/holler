@@ -21,7 +21,7 @@ use winit::{
 };
 
 use crate::font;
-use crate::overlay::{blend, pack, sd_round_rect, Rgb};
+use crate::overlay::{blend, make_pill_window, pack, sd_round_rect, Rgb};
 
 pub const WIDTH: u32 = 420;
 pub const HEIGHT: u32 = 56;
@@ -29,7 +29,6 @@ pub const HEIGHT: u32 = 56;
 pub const VISIBLE_SECS: u64 = 4;
 
 // Palette — matches the recording overlay / status popup (macOS dark material).
-const BG: Rgb = (18, 18, 20);
 const PILL: Rgb = (44, 44, 46);
 const RING: Rgb = (72, 72, 76);
 const TEXT: Rgb = (235, 235, 240); // Apple primary label
@@ -68,6 +67,9 @@ impl Toast {
             .with_decorations(false)
             .with_resizable(false)
             .with_window_level(WindowLevel::AlwaysOnTop)
+            // Float the rounded pill free of a backing rectangle (layer shaped
+            // in make_pill_window below).
+            .with_transparent(true)
             .with_visible(false);
 
         // Windows: keep it out of the taskbar and, crucially, don't let it take
@@ -81,6 +83,7 @@ impl Toast {
         let window = Arc::new(event_loop.create_window(attrs).ok()?);
         let ctx = Context::new(window.clone()).ok()?;
         let surface = Surface::new(&ctx, window.clone()).ok()?;
+        make_pill_window(&window, HEIGHT as f64 / 2.0);
         Some(Self {
             window,
             _ctx: ctx,
@@ -127,15 +130,15 @@ fn paint(buf: &mut [u32], msg: &str) {
     let half_h = h as f32 / 2.0 - 1.5;
     let radius = half_h;
 
+    // Fill with the pill colour; the window layer is rounded + clipped
+    // (make_pill_window) so no dark backdrop shows behind the corners. The SDF
+    // paints the subtle AA edge ring and is a same-colour fallback if the layer
+    // clip isn't available.
     for y in 0..h {
         for x in 0..w {
             let idx = (y * w + x) as usize;
-            buf[idx] = pack(BG);
+            buf[idx] = pack(PILL);
             let sd = sd_round_rect(x as f32 + 0.5 - cx, y as f32 + 0.5 - cy, half_w, half_h, radius);
-            let fill = (0.5 - sd).clamp(0.0, 1.0);
-            if fill > 0.0 {
-                blend(buf, idx, PILL, fill);
-            }
             let ring = (1.0 - (sd + 1.2).abs()).clamp(0.0, 1.0);
             if ring > 0.0 {
                 blend(buf, idx, RING, ring * 0.9);
