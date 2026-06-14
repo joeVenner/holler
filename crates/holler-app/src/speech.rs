@@ -223,18 +223,20 @@ impl SpeechController {
 
                     // Clean the text once, then speak it batch-by-batch. Long
                     // passages start playing sooner (the first batch is small)
-                    // and never hit the provider as one giant request. Cloud
-                    // backends fetch the next batch(es) while the current one
-                    // plays (no inter-batch silence); the native voice plays each
-                    // batch in turn. Both re-check the epoch between batches so a
-                    // newer request or a stop ends the run promptly instead of
-                    // finishing the whole text.
+                    // and never hit the provider as one giant request. Between
+                    // batches we re-check the epoch so a newer request or a stop
+                    // ends the run promptly instead of finishing the whole text.
                     let batches = split_into_batches(&clean_for_speech(&job.text));
-                    let result = if job.provider.can_prefetch() {
-                        speak_prefetched(&job, &batches, &worker_latest, &on_phase)
-                    } else {
-                        speak_sequential(&job, &batches, &worker_latest, &on_phase)
-                    };
+                    let mut result = Ok(());
+                    for batch in &batches {
+                        if job.epoch != worker_latest.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        result = job.provider.speak(batch, &on_phase);
+                        if result.is_err() {
+                            break;
+                        }
+                    }
                     set_active(&worker_active, None);
 
                     // Only the still-current job owns the popup: if a newer
@@ -306,98 +308,6 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// How many batches to keep synthesized ahead of playback. Two means the first
-/// two batches are fetched up front and the next is fetched as soon as an
-/// earlier one finishes playing — so playback rarely waits on the network, while
-/// we never race far ahead of a listener who may stop partway through.
-const PREFETCH_AHEAD: usize = 2;
-
-/// Speak `batches` in order, hiding each cloud synthesis round-trip behind the
-/// previous batch's playback. A detached background thread synthesizes ahead
-/// (bounded to `PREFETCH_AHEAD` clips by the channel); this thread plays them in
-/// order. The synthesizer stops as soon as a newer request or a stop bumps the
-/// epoch, so we never fetch audio the listener will not hear. The native voice
-/// never takes this path (it can't pre-synthesize); only cloud backends do.
-fn speak_prefetched(
-    job: &Job,
-    batches: &[String],
-    latest: &Arc<AtomicU64>,
-    on_phase: &dyn Fn(SpeakPhase),
-) -> Result<(), TtsError> {
-    let (tx, rx) = mpsc::sync_channel::<Result<PreparedAudio, TtsError>>(PREFETCH_AHEAD);
-
-    let synth_provider = Arc::clone(&job.provider);
-    let synth_batches = batches.to_vec();
-    let synth_latest = Arc::clone(latest);
-    let synth_epoch = job.epoch;
-    // Detached on purpose: if the worker stops early (epoch bumped), `rx` drops
-    // when this fn returns, the synthesizer's next `send` fails, and the thread
-    // exits. An in-flight synthesize finishes and is discarded rather than
-    // blocking the worker from moving on to the next utterance.
-    let _synth = std::thread::Builder::new()
-        .name("holler-tts-prefetch".into())
-        .spawn(move || {
-            for batch in &synth_batches {
-                if synth_epoch != synth_latest.load(Ordering::SeqCst) {
-                    break;
-                }
-                let item = synth_provider.prepare(batch);
-                let failed = item.is_err();
-                // Stop on a closed channel (worker moved on) or after an error.
-                if tx.send(item).is_err() || failed {
-                    break;
-                }
-            }
-        });
-
-    // The first clip is on its way — surface "generating" once. Later clips are
-    // already prefetched, so playback stays continuous from here on.
-    on_phase(SpeakPhase::Synthesizing);
-    let mut result = Ok(());
-    for _ in 0..batches.len() {
-        if job.epoch != latest.load(Ordering::SeqCst) {
-            break;
-        }
-        match rx.recv() {
-            Ok(Ok(audio)) => {
-                result = job.provider.play_prepared(audio, on_phase);
-                if result.is_err() {
-                    break;
-                }
-            }
-            Ok(Err(e)) => {
-                result = Err(e);
-                break;
-            }
-            // Synthesizer ended: epoch bumped, or every batch was produced.
-            Err(_) => break,
-        }
-    }
-    result
-}
-
-/// Speak `batches` one at a time with the blocking [`TtsProvider::speak`] — the
-/// path for backends that can't pre-synthesize (the native voice, which is local
-/// so inter-batch gaps are negligible). Cancels between batches on the epoch.
-fn speak_sequential(
-    job: &Job,
-    batches: &[String],
-    latest: &Arc<AtomicU64>,
-    on_phase: &dyn Fn(SpeakPhase),
-) -> Result<(), TtsError> {
-    let mut result = Ok(());
-    for batch in batches {
-        if job.epoch != latest.load(Ordering::SeqCst) {
-            break;
-        }
-        result = job.provider.speak(batch, on_phase);
-        if result.is_err() {
-            break;
-        }
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,99 +353,5 @@ mod tests {
         let padded = format!("{text} {}", "more padding words ".repeat(30));
         let batches = split_into_batches(&clean_for_speech(&padded));
         assert!(batches.iter().all(|b| b.len() <= BATCH_MAX_CHARS));
-    }
-
-    fn batches(of: &[&str]) -> Vec<String> {
-        of.iter().map(|s| s.to_string()).collect()
-    }
-
-    fn job_with(provider: Arc<dyn TtsProvider>, epoch: u64) -> Job {
-        Job { epoch, text: String::new(), provider }
-    }
-
-    /// A cloud-like backend: synthesizes audio from text (the bytes ARE the text,
-    /// so playback can record what it played) and supports prefetch.
-    struct FakeCloud {
-        prepared: Mutex<Vec<String>>,
-        played: Mutex<Vec<String>>,
-    }
-    impl FakeCloud {
-        fn new() -> Arc<Self> {
-            Arc::new(Self { prepared: Mutex::new(Vec::new()), played: Mutex::new(Vec::new()) })
-        }
-    }
-    impl TtsProvider for FakeCloud {
-        fn speak(&self, _t: &str, _p: &dyn Fn(SpeakPhase)) -> Result<(), TtsError> {
-            panic!("prefetch backends must go through prepare/play_prepared, not speak");
-        }
-        fn stop(&self) -> Result<(), TtsError> {
-            Ok(())
-        }
-        fn name(&self) -> &str {
-            "fake-cloud"
-        }
-        fn can_prefetch(&self) -> bool {
-            true
-        }
-        fn prepare(&self, text: &str) -> Result<PreparedAudio, TtsError> {
-            lock(&self.prepared).push(text.to_string());
-            Ok(PreparedAudio::new(text.as_bytes().to_vec()))
-        }
-        fn play_prepared(&self, audio: PreparedAudio, on_phase: &dyn Fn(SpeakPhase)) -> Result<(), TtsError> {
-            on_phase(SpeakPhase::Playing);
-            lock(&self.played).push(String::from_utf8_lossy(audio.as_bytes()).into_owned());
-            Ok(())
-        }
-    }
-
-    /// A native-like backend: blocking speak only, no prefetch capability.
-    struct FakeNative {
-        spoken: Mutex<Vec<String>>,
-    }
-    impl TtsProvider for FakeNative {
-        fn speak(&self, text: &str, on_phase: &dyn Fn(SpeakPhase)) -> Result<(), TtsError> {
-            on_phase(SpeakPhase::Playing);
-            lock(&self.spoken).push(text.to_string());
-            Ok(())
-        }
-        fn stop(&self) -> Result<(), TtsError> {
-            Ok(())
-        }
-        fn name(&self) -> &str {
-            "fake-native"
-        }
-    }
-
-    #[test]
-    fn prefetch_plays_and_synthesizes_every_batch_in_order() {
-        let provider = FakeCloud::new();
-        let latest = Arc::new(AtomicU64::new(7));
-        let job = job_with(provider.clone(), 7);
-        let bs = batches(&["one.", "two.", "three.", "four.", "five."]);
-        assert!(speak_prefetched(&job, &bs, &latest, &|_| {}).is_ok());
-        // Both synthesis and playback preserve batch order, and nothing is lost.
-        assert_eq!(*lock(&provider.played), bs);
-        assert_eq!(*lock(&provider.prepared), bs);
-    }
-
-    #[test]
-    fn prefetch_cancelled_before_start_plays_nothing() {
-        let provider = FakeCloud::new();
-        // `latest` already past the job's epoch — the request was superseded.
-        let latest = Arc::new(AtomicU64::new(9));
-        let job = job_with(provider.clone(), 7);
-        let bs = batches(&["a.", "b.", "c."]);
-        assert!(speak_prefetched(&job, &bs, &latest, &|_| {}).is_ok());
-        assert!(lock(&provider.played).is_empty(), "a stale job must not play");
-    }
-
-    #[test]
-    fn sequential_speaks_each_batch_in_order() {
-        let provider = Arc::new(FakeNative { spoken: Mutex::new(Vec::new()) });
-        let latest = Arc::new(AtomicU64::new(3));
-        let job = job_with(provider.clone(), 3);
-        let bs = batches(&["x.", "y.", "z."]);
-        assert!(speak_sequential(&job, &bs, &latest, &|_| {}).is_ok());
-        assert_eq!(*lock(&provider.spoken), bs);
     }
 }
