@@ -98,15 +98,19 @@ impl Overlay {
             .with_decorations(false)
             .with_resizable(false)
             .with_window_level(WindowLevel::AlwaysOnTop)
-            // Let the rounded pill float free of a backing rectangle (macOS
-            // shapes the layer in make_pill_window below).
-            .with_transparent(true)
             .with_visible(false);
 
-        // Windows-only parity with the macOS ornamental overlay: keep it out of
-        // the taskbar and don't let it steal focus from the field about to be
-        // pasted into. (macOS doesn't show a taskbar button or take key focus
-        // for a borderless always-on-top window, so this is gated to Windows.)
+        // macOS: the layer is shaped into a pill in make_pill_window (cornerRadius +
+        // masksToBounds on the CALayer), so the window must be non-opaque — the
+        // transparent corners let the desktop show through. On Windows the GDI
+        // backend (softbuffer SRCCOPY BitBlt) cannot blend a transparent window;
+        // keep the window opaque there so softbuffer pixels are always visible.
+        #[cfg(target_os = "macos")]
+        let attrs = attrs.with_transparent(true);
+
+        // Windows-only: keep it out of the taskbar and don't steal focus from the
+        // field about to be pasted into (macOS has this for free on borderless
+        // always-on-top windows, so no flag needed there).
         #[cfg(target_os = "windows")]
         let attrs = {
             use winit::platform::windows::WindowAttributesExtWindows;

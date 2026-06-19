@@ -67,10 +67,12 @@ impl Toast {
             .with_decorations(false)
             .with_resizable(false)
             .with_window_level(WindowLevel::AlwaysOnTop)
-            // Float the rounded pill free of a backing rectangle (layer shaped
-            // in make_pill_window below).
-            .with_transparent(true)
             .with_visible(false);
+
+        // macOS: pill shape requires a transparent window (same reason as overlay.rs).
+        // Windows GDI can't blend transparent windows; keep it opaque there.
+        #[cfg(target_os = "macos")]
+        let attrs = attrs.with_transparent(true);
 
         // Windows: keep it out of the taskbar and, crucially, don't let it take
         // focus — the user is about to paste into another app.

@@ -149,10 +149,12 @@ impl StatusPopup {
             .with_decorations(false)
             .with_resizable(false)
             .with_window_level(WindowLevel::AlwaysOnTop)
-            // Float the rounded pill free of a backing rectangle (the layer is
-            // shaped in make_pill_window below).
-            .with_transparent(true)
             .with_visible(false);
+
+        // macOS: pill shape requires a transparent window (same reason as overlay.rs).
+        // Windows GDI can't blend transparent windows; keep it opaque there.
+        #[cfg(target_os = "macos")]
+        let attrs = attrs.with_transparent(true);
 
         #[cfg(target_os = "windows")]
         let attrs = {
@@ -448,6 +450,7 @@ fn fill_round_rect(buf: &mut [u32], x0: f32, y0: f32, x1: f32, y1: f32, r: f32, 
 /// Anti-aliased circular arc (a radial band over an angular range). Angles are in
 /// radians, measured counter-clockwise from the +x axis in screen space (y down
 /// is handled by the callers' sign choices).
+#[allow(clippy::too_many_arguments)]
 fn draw_arc(buf: &mut [u32], cx: f32, cy: f32, r: f32, thickness: f32, start: f32, end: f32, col: Rgb) {
     let outer = r + thickness;
     let x0 = (cx - outer - 1.0).floor() as i32;
