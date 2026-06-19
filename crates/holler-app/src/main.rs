@@ -1101,11 +1101,34 @@ impl App {
         if text.trim().is_empty() {
             return;
         }
+        self.last_spoken = Some(text.clone());
+
+        // On non-macOS the holler-tts cloud backends cannot play audio (their
+        // in-process sinks rely on AVFoundation). Rather than silently failing or
+        // hanging on a 60-second network timeout, route read-aloud through the
+        // system TTS engine (tts::Tts — SAPI/WinRT on Windows) that already
+        // powers the Settings → History "Read aloud" action.
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.on_speech_status(SpeechStatus::Triggered);
+            match self.speak(&text) {
+                Ok(()) => {
+                    // tts::Tts speaks asynchronously — the audio is queued and we
+                    // get no completion callback here. Emit Speaking so the popup
+                    // shows a live indicator; it will auto-dismiss via stop_read_aloud
+                    // or the user pressing Stop.
+                    self.on_speech_status(SpeechStatus::Speaking);
+                }
+                Err(e) => self.on_speech_status(SpeechStatus::Error(e)),
+            }
+            return;
+        }
+
+        // macOS: use the holler-tts provider with the full serialized worker.
         let Some(provider) = self.read_tts.as_ref().map(Arc::clone) else {
             eprintln!("[holler] read-aloud unavailable — no TTS provider");
             return;
         };
-        self.last_spoken = Some(text.clone());
         self.on_speech_status(SpeechStatus::Triggered);
         if let Some(speech) = self.ensure_speech() {
             speech.speak(text, provider);
@@ -1129,6 +1152,15 @@ impl App {
     /// for a cancelled job). Falls back to a direct provider stop if the worker
     /// was never spawned.
     fn stop_read_aloud(&mut self) {
+        // On non-macOS the read-aloud routes through tts::Tts (see start_speaking).
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.stop_speaking();
+            println!("[holler] read-aloud stopped");
+            self.on_speech_status(SpeechStatus::Stopped);
+            return;
+        }
+
         match &mut self.speech {
             Some(speech) => {
                 speech.stop();

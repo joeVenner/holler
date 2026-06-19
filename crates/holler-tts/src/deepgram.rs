@@ -152,15 +152,9 @@ impl TtsProvider for DeepgramTts {
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn speak(&self, text: &str, on_phase: &dyn Fn(SpeakPhase)) -> Result<(), TtsError> {
-        // The cloud request is cross-platform, but in-process playback currently
-        // relies on AVFoundation. Other hosts need their own sink (TODO).
-        self.stop_requested.store(false, Ordering::SeqCst);
-        if text.trim().is_empty() {
-            return Ok(());
-        }
-        on_phase(SpeakPhase::Synthesizing);
-        let _wav = self.synthesize(text)?;
+    fn speak(&self, _text: &str, _on_phase: &dyn Fn(SpeakPhase)) -> Result<(), TtsError> {
+        // In-process playback uses AVFoundation (macOS-only). Don't make a network
+        // call that would be discarded — return immediately so the caller falls back.
         Err(TtsError::Unsupported(
             "cloud TTS playback is implemented for macOS only in this build".into(),
         ))
