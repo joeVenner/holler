@@ -157,7 +157,11 @@ impl TtsProvider for OpenAiTts {
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn speak(&self, _text: &str, _on_phase: &dyn Fn(SpeakPhase)) -> Result<(), TtsError> {
+    fn speak(&self, text: &str, _on_phase: &dyn Fn(SpeakPhase)) -> Result<(), TtsError> {
+        self.stop_requested.store(false, Ordering::SeqCst);
+        if text.trim().is_empty() {
+            return Ok(());
+        }
         // In-process playback uses AVFoundation (macOS-only). Don't make a network
         // call that would be discarded — return immediately so the caller falls back.
         Err(TtsError::Unsupported(
