@@ -361,10 +361,16 @@ impl UiState {
                 .insert(meta.id, holler_config::secret_status(meta.id));
             self.key_drafts.remove(meta.id); // never retain typed key material
         }
+        if provider == "openai" {
+            self.tts_key_status = holler_config::secret_status("openai");
+        } else if provider == "deepgram" {
+            self.tts_deepgram_key_status = holler_config::secret_status("deepgram");
+        }
         self.provider_status = Some(match res {
             Ok(()) => (true, "Key updated ✓".to_string()),
             Err(e) => (false, e),
         });
+        self.tts_status = self.provider_status.clone();
     }
 
     /// Outcome of a `LoadHistory`/`DeleteHistory` reload: replace the list on
@@ -700,6 +706,12 @@ impl UiState {
         }
         ui.add_space(10.0);
 
+        ui.strong("API keys");
+        ui.add_space(2.0);
+        self.draw_tts_key_row(ui, "openai", "OpenAI");
+        self.draw_tts_key_row(ui, "deepgram", "Deepgram");
+        ui.add_space(10.0);
+
         // --- Voice + rate. Blank voice / 0 rate = the backend default. ---
         ui.strong("Voice & rate");
         ui.add_space(2.0);
@@ -765,6 +777,60 @@ impl UiState {
         self.draw_tts_hotkey_row(ui, TtsHotkey::ReadClipboard);
         self.draw_tts_hotkey_row(ui, TtsHotkey::Stop);
         draw_status(ui, &self.tts_hotkey_status);
+    }
+
+    /// Key controls embedded in Read Aloud so cloud voices can be fully set up
+    /// without detouring through the dictation Providers panel.
+    fn draw_tts_key_row(&mut self, ui: &mut egui::Ui, provider: &'static str, label: &str) {
+        ui.indent((provider, "tts-key"), |ui| {
+            ui.horizontal(|ui| {
+                ui.label(format!("{label}:"));
+                match provider {
+                    "openai" => draw_key_status(ui, self.tts_key_status),
+                    "deepgram" => draw_key_status(ui, self.tts_deepgram_key_status),
+                    _ => {
+                        ui.weak("no key ✗");
+                    }
+                }
+            });
+
+            let status = match provider {
+                "openai" => self.tts_key_status,
+                "deepgram" => self.tts_deepgram_key_status,
+                _ => SecretStatus::Missing,
+            };
+            let from_env = status == SecretStatus::FromEnv;
+            let draft = self.key_drafts.entry(provider).or_default();
+            ui.horizontal(|ui| {
+                ui.add_enabled(
+                    !from_env,
+                    egui::TextEdit::singleline(draft)
+                        .password(true)
+                        .hint_text("paste API key")
+                        .desired_width(220.0),
+                );
+                let can_set = !from_env && !draft.trim().is_empty();
+                if ui.add_enabled(can_set, egui::Button::new("Set key")).clicked() {
+                    let key = std::mem::take(draft);
+                    self.actions.push(SettingsAction::SetKey {
+                        provider: provider.to_string(),
+                        key: key.trim().to_string(),
+                    });
+                }
+                let can_clear = status == SecretStatus::FromFile;
+                if ui
+                    .add_enabled(can_clear, egui::Button::new("Clear"))
+                    .clicked()
+                {
+                    self.actions.push(SettingsAction::ClearKey {
+                        provider: provider.to_string(),
+                    });
+                }
+            });
+            if from_env {
+                ui.weak("Managed by the environment variable — unset it in your shell to change.");
+            }
+        });
     }
 
     /// One hotkey row: the current combo + a "Change" button that flips into the
